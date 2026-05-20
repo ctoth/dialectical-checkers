@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import pytest
 
+from dialectical_checkers import witnesses
 from dialectical_checkers.arguments import MoveProbe
 from dialectical_checkers.board import CheckersBoard
+from dialectical_checkers.captures import ShotResult
 from dialectical_checkers.captures import Tier as ResolverTier
 from dialectical_checkers.captures import opponent_shot, own_shot
 from dialectical_checkers.evidence import to_argument_evidence
@@ -289,6 +291,119 @@ def test_defense_when_resolver_refutes_apparent_reply() -> None:
 
 
 # ---------------------------------------------------------------------------
+# unit — curated king-capture and deep (3+ ply) forced-line witnesses
+# ---------------------------------------------------------------------------
+#
+# The positions below are the king/deep shots independently hand-verified by
+# ``scripts/verify_king_deep_shots.py`` (engine banded capture-minimax replayed
+# move-by-move in pydraughts, terminal verdicts agreeing). Each test asserts
+# the exact FACT witness set ``probe_moves()`` emits, so a witness-layer
+# regression on king material, king multi-jumps, or deep forced lines is
+# caught. The asserted labels were confirmed by
+# ``scripts/phase3a_verify_king_witness_labels.py``.
+
+
+@pytest.mark.unit
+def test_king_single_capture_witnesses() -> None:
+    """A lone Red KING captures a White man, ending the game.
+
+    ``B:W18:BK15`` (Red) — Red's only legal move is the king capture
+    ``15x22``: it takes White's last man (weighted 100), the king cannot be
+    crowned again, and White is left with no piece — a terminal Red win. The
+    move carries the terminal win, the captured material, and the proven shot
+    setup.
+    """
+    board = CheckersBoard.from_fen("B:W18:BK15")
+    probe = _probe_for(board, "15x22")
+    assert _fact_labels(probe) == {
+        "pro:terminal_win",
+        "pro:material:100",
+        "pro:shot_setup:100",
+    }
+
+
+@pytest.mark.unit
+def test_king_double_jump_witnesses() -> None:
+    """A Red KING multi-jump takes two White men in one chained capture.
+
+    ``B:W7,15:BK2`` (Red) — the king's only move is the double jump
+    ``2x11x18`` capturing both White men (weighted 200), leaving White with no
+    piece — a terminal Red win. The move carries the terminal win, the 200 of
+    captured material, and the proven shot setup of 200.
+    """
+    board = CheckersBoard.from_fen("B:W7,15:BK2")
+    probe = _probe_for(board, "2x11x18")
+    assert _fact_labels(probe) == {
+        "pro:terminal_win",
+        "pro:material:200",
+        "pro:shot_setup:200",
+    }
+
+
+@pytest.mark.unit
+def test_king_triple_jump_witnesses() -> None:
+    """A Red KING triple jump takes three White men in one chained capture.
+
+    ``B:W18,25,26:BK14`` (Red) — the king's only move is the triple jump
+    ``14x23x30x21`` capturing all three White men (weighted 300), a terminal
+    Red win. The move carries the terminal win, 300 of captured material, and
+    the proven shot setup of 300.
+    """
+    board = CheckersBoard.from_fen("B:W18,25,26:BK14")
+    probe = _probe_for(board, "14x23x30x21")
+    assert _fact_labels(probe) == {
+        "pro:terminal_win",
+        "pro:material:300",
+        "pro:shot_setup:300",
+    }
+
+
+@pytest.mark.unit
+def test_deep_three_ply_forced_line_witnesses() -> None:
+    """A genuine 3-ply forced line: capture, forced recapture, forced finish.
+
+    ``B:WK15,22:B18,19,K27,31`` (Red) — Red plays the capture ``18x25``
+    (weighted gain 100). The whole forced line is three plies: ``18x25``, then
+    White's only move ``15x24`` (a forced king recapture), then Red's forced
+    finish ``27x20`` (a king capture) leaving White with no piece — a terminal
+    Red win, net swing 150 over the line.
+
+    The opening move ``18x25`` carries ``pro:material:100`` for the man it
+    itself takes and ``pro:shot_setup:150`` — the resolver proves the whole
+    3-ply line nets the mover 150. It is not yet terminal, so no
+    ``pro:terminal_win`` on this move.
+    """
+    board = CheckersBoard.from_fen("B:WK15,22:B18,19,K27,31")
+    probe = _probe_for(board, "18x25")
+    assert _fact_labels(probe) == {
+        "pro:material:100",
+        "pro:shot_setup:150",
+    }
+    # Walk the forced line: after 18x25 White's only move is the forced
+    # recapture 15x24, after which Red's forced finish 27x20 wins the game.
+    after_first = board.apply(
+        {m.pdn(): m for m in board.legal_moves()}["18x25"]
+    )
+    white_moves = after_first.legal_moves()
+    assert [m.pdn() for m in white_moves] == ["15x24"], [
+        m.pdn() for m in white_moves
+    ]
+    # White's forced recapture loses the game by force: it carries the
+    # terminal-loss objection and the matching terminal-loss reply attack.
+    white_probe = _probe_for(after_first, "15x24")
+    assert "obj:terminal_loss" in white_probe.objections
+    assert "reply:terminal_loss" in white_probe.reply_attacks
+    # Red's forced finish 27x20 is a king capture that ends the game.
+    after_second = after_first.apply(white_moves[0])
+    finish = _probe_for(after_second, "27x20")
+    assert _fact_labels(finish) == {
+        "pro:terminal_win",
+        "pro:material:150",
+        "pro:shot_setup:150",
+    }
+
+
+# ---------------------------------------------------------------------------
 # differential — consistency with the verified forced-capture resolver
 # ---------------------------------------------------------------------------
 #
@@ -306,6 +421,13 @@ CONSISTENCY_FENS: list[str] = [
     "B:W10,17,18:B6,13,14",
     "B:W18,22:B9,13,25,29",
     "W:W23:B18,27",
+    # King-capture and deep (3+ ply) forced lines — verified by
+    # scripts/verify_king_deep_shots.py; the curated assertions for these are
+    # the king/deep witness tests above.
+    "B:W18:BK15",
+    "B:W7,15:BK2",
+    "B:W18,25,26:BK14",
+    "B:WK15,22:B18,19,K27,31",
 ]
 
 
@@ -383,12 +505,14 @@ def test_terminal_win_iff_child_terminal_for_mover(fen: str) -> None:
 
 @pytest.mark.differential
 @pytest.mark.parametrize("fen", CONSISTENCY_FENS, ids=lambda v: v)
-def test_no_truncated_resolver_result_becomes_a_fact_witness(fen: str) -> None:
-    """Every witness emitted is FACT — a truncated resolver line never leaks.
+def test_every_emitted_consistency_label_is_fact(fen: str) -> None:
+    """Across the consistency sample every emitted witness is FACT-tier.
 
-    A truncated / ``Tier.HEURISTIC`` resolver result must not appear as a FACT
-    witness (design §5: never assert a tier the resolver did not earn). Phase
-    3a emits only FACT witnesses, so the whole emitted set must be FACT.
+    Phase 3a emits only FACT witnesses; this sanity-checks the whole emitted
+    set across the differential sample. It does NOT, on its own, prove the
+    tier discipline of ``witnesses.py`` — see the monkeypatched truncation
+    tests below, which genuinely drive a ``Tier.HEURISTIC`` resolver result
+    through ``probe_moves()`` and exercise the tier guards directly.
     """
     board = CheckersBoard.from_fen(fen)
     for probe in probe_moves(board):
@@ -403,3 +527,165 @@ def test_no_truncated_resolver_result_becomes_a_fact_witness(fen: str) -> None:
                 probe.pdn,
                 label,
             )
+
+
+# ---------------------------------------------------------------------------
+# unit — tier discipline: a truncated (HEURISTIC) resolver result never
+# becomes a FACT witness. These DRIVE a ``Tier.HEURISTIC`` ``ShotResult``
+# through ``probe_moves()`` by monkeypatching the resolver entry points
+# ``witnesses.own_shot`` / ``witnesses.opponent_shot`` — so they exercise the
+# tier guards at ``witnesses.py`` directly, and FAIL if either guard is
+# removed. (The differential test above would still pass with the guards gone,
+# because the sampled positions resolve within budget; that is the coverage
+# gap these tests close.)
+# ---------------------------------------------------------------------------
+#
+# ``witnesses.py`` imports ``own_shot`` / ``opponent_shot`` into its own module
+# namespace, so the monkeypatch target is ``witnesses.own_shot`` /
+# ``witnesses.opponent_shot`` — patching the names ``_probe_move`` actually
+# calls.
+
+# A capture move that, with a real resolver, loses the exchange (see
+# ``test_capture_that_loses_the_exchange``) — used to drive ``own_shot``.
+_CAPTURE_FEN = "B:W10,17,18:B6,13,14"
+_CAPTURE_PDN = "13x22"
+# A quiet move that, with a real resolver, allows a shot (see
+# ``test_move_allows_opponent_a_shot``) — used to drive ``opponent_shot``.
+_QUIET_FEN = "B:W22,30:B6,9,13,14"
+_QUIET_PDN = "13-17"
+
+
+def _shot(tier: ResolverTier, *, terminal: str | None = None) -> ShotResult:
+    """A synthetic ``ShotResult`` with the given resolver ``tier``.
+
+    ``material_net`` is a large, recognisably-synthetic positive value so any
+    leaked witness derived from it is unmistakable in an assertion message.
+    """
+    return ShotResult(
+        material_net=300,
+        forced=True,
+        truncated=tier is ResolverTier.HEURISTIC,
+        terminal=terminal,
+        tier=tier,
+    )
+
+
+@pytest.mark.unit
+def test_heuristic_own_shot_yields_no_fact_shot_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A HEURISTIC ``own_shot`` result must NOT produce a ``pro:shot_setup``.
+
+    Drives a truncated (``Tier.HEURISTIC``) resolver result through
+    ``probe_moves()``: ``witnesses.own_shot`` is monkeypatched to return a
+    HEURISTIC ``ShotResult``. The ``setup.tier is Tier.FACT`` guard in
+    ``witnesses.py`` must suppress the ``pro:shot_setup`` reason — removing
+    that guard makes this test fail.
+    """
+    monkeypatch.setattr(
+        witnesses, "own_shot", lambda *a, **k: _shot(ResolverTier.HEURISTIC)
+    )
+    probe = _probe_for(CheckersBoard.from_fen(_CAPTURE_FEN), _CAPTURE_PDN)
+    setups = [r for r in probe.reasons if r.startswith("pro:shot_setup")]
+    assert setups == [], setups
+
+
+@pytest.mark.unit
+def test_fact_own_shot_does_produce_shot_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FACT control: a FACT ``own_shot`` DOES produce ``pro:shot_setup``.
+
+    Confirms it is the *tier guard* — not merely the absence of any shot at
+    that boundary — that suppresses the HEURISTIC case above. With an
+    otherwise-identical FACT ``ShotResult`` the reason IS emitted.
+    """
+    monkeypatch.setattr(
+        witnesses, "own_shot", lambda *a, **k: _shot(ResolverTier.FACT)
+    )
+    probe = _probe_for(CheckersBoard.from_fen(_CAPTURE_FEN), _CAPTURE_PDN)
+    setups = [r for r in probe.reasons if r.startswith("pro:shot_setup")]
+    assert setups == ["pro:shot_setup:300"], setups
+
+
+@pytest.mark.unit
+def test_heuristic_opponent_shot_yields_no_fact_objection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A HEURISTIC ``opponent_shot`` must NOT produce any FACT objection.
+
+    Drives a truncated (``Tier.HEURISTIC``) resolver result through
+    ``probe_moves()``: ``witnesses.opponent_shot`` is monkeypatched to return a
+    HEURISTIC ``ShotResult``. The ``shot.tier is Tier.FACT`` guard in
+    ``witnesses.py`` must suppress every objection, reply attack, and defense
+    derived from it — removing that guard makes this test fail.
+    """
+    monkeypatch.setattr(
+        witnesses,
+        "opponent_shot",
+        lambda *a, **k: _shot(ResolverTier.HEURISTIC),
+    )
+    probe = _probe_for(CheckersBoard.from_fen(_QUIET_FEN), _QUIET_PDN)
+    derived = [*probe.objections, *probe.reply_attacks, *probe.defenses]
+    assert derived == [], derived
+
+
+@pytest.mark.unit
+def test_fact_opponent_shot_does_produce_objection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FACT control: a FACT ``opponent_shot`` DOES produce a FACT objection.
+
+    Confirms it is the *tier guard* — not the absence of any shot at that
+    boundary — that suppresses the HEURISTIC case above. With an
+    otherwise-identical FACT ``ShotResult`` the quiet move carries
+    ``obj:allows_shot`` and the matching ``reply:material``.
+    """
+    monkeypatch.setattr(
+        witnesses,
+        "opponent_shot",
+        lambda *a, **k: _shot(ResolverTier.FACT),
+    )
+    probe = _probe_for(CheckersBoard.from_fen(_QUIET_FEN), _QUIET_PDN)
+    derived = [*probe.objections, *probe.reply_attacks, *probe.defenses]
+    assert "obj:allows_shot:300" in derived, derived
+    assert "reply:material:300" in derived, derived
+
+
+@pytest.mark.unit
+def test_heuristic_resolver_result_emits_no_fact_witness_anywhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With BOTH resolver entry points HEURISTIC, no FACT witness leaks.
+
+    Both ``witnesses.own_shot`` and ``witnesses.opponent_shot`` are
+    monkeypatched to return HEURISTIC ``ShotResult`` objects. No
+    resolver-derived FACT witness (``pro:shot_setup``, ``obj:allows_shot``,
+    ``obj:loses_exchange``, ``obj:terminal_loss``, ``reply:...``,
+    ``defense:...``) may appear on ANY probe — only the non-resolver reasons
+    (``pro:material``, ``pro:crown``, ``pro:terminal_win``) survive.
+    """
+    monkeypatch.setattr(
+        witnesses, "own_shot", lambda *a, **k: _shot(ResolverTier.HEURISTIC)
+    )
+    monkeypatch.setattr(
+        witnesses,
+        "opponent_shot",
+        lambda *a, **k: _shot(ResolverTier.HEURISTIC),
+    )
+    resolver_prefixes = (
+        "pro:shot_setup",
+        "obj:allows_shot",
+        "obj:loses_exchange",
+        "obj:terminal_loss",
+        "reply:",
+        "defense:",
+    )
+    for fen in (_CAPTURE_FEN, _QUIET_FEN):
+        for probe in probe_moves(CheckersBoard.from_fen(fen)):
+            for label in _all_labels(probe):
+                assert not label.startswith(resolver_prefixes), (
+                    fen,
+                    probe.pdn,
+                    label,
+                )

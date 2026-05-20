@@ -107,12 +107,24 @@ def to_argument_evidence(label: str) -> ArgumentEvidence:
     mag = _MAGNITUDE.get(head)
     if mag is None:
         raise ValueError(f"unknown witness label {label!r}")
-    try:
-        magnitude = int(tail)
-    except ValueError:
+    # ``{n}`` is a material gain/loss magnitude (design §5): a strictly
+    # positive base-10 integer of bare ASCII digits. A signed (``-100``,
+    # ``+100``) or zero magnitude is malformed — the witness producers only
+    # ever emit positive magnitudes, and accepting a signed/zero one would
+    # silently mistype a malformed label as valid FACT evidence (cf. the
+    # malformed-label rejection above). ``str.isascii() and str.isdecimal()``
+    # admits exactly a run of ASCII ``0``-``9`` and rejects empty strings,
+    # signs, whitespace, and unicode-digit lookalikes (e.g. ``²``) that would
+    # otherwise crash ``int()``.
+    if not (tail.isascii() and tail.isdecimal()):
         raise ValueError(
             f"witness label {label!r} has a non-integer magnitude {tail!r}"
-        ) from None
+        )
+    magnitude = int(tail)
+    if magnitude <= 0:
+        raise ValueError(
+            f"witness label {label!r} has a non-positive magnitude {tail!r}"
+        )
     value, tier = mag
     return ArgumentEvidence(
         label=label, value=value, tier=tier, magnitude=magnitude

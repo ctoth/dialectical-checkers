@@ -126,3 +126,32 @@ def test_unknown_or_malformed_label_raises(label: str) -> None:
     """An unknown or malformed witness label raises rather than mistyping."""
     with pytest.raises(ValueError):
         to_argument_evidence(label)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "label",
+    [
+        # A ``{n}`` magnitude is a strictly positive material gain/loss
+        # (design §5) — the witness producers only ever emit positive
+        # magnitudes. A signed, ``+``-prefixed, or zero magnitude is malformed
+        # and must be rejected, never accepted as valid FACT evidence.
+        "pro:material:-100",     # negative magnitude
+        "obj:allows_shot:-100",  # negative magnitude
+        "reply:material:+100",   # explicit-plus-prefixed magnitude
+        "pro:shot_setup:0",      # zero magnitude
+        "pro:material:0",        # zero magnitude
+        "obj:loses_exchange:0",  # zero magnitude
+        "pro:material:00",       # zero magnitude with a leading zero
+        "pro:material: 100",     # leading whitespace
+    ],
+)
+def test_signed_or_zero_magnitude_raises(label: str) -> None:
+    """A signed, ``+``-prefixed, or zero magnitude is rejected as malformed.
+
+    Magnitudes for the FACT §5 labels are strictly positive integers; a
+    negative, explicit-plus, or zero magnitude must raise rather than be
+    silently accepted as typed FACT evidence.
+    """
+    with pytest.raises(ValueError):
+        to_argument_evidence(label)
