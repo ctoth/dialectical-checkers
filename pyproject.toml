@@ -38,6 +38,9 @@ Homepage = "https://github.com/ctoth/dialectical-checkers"
 Repository = "https://github.com/ctoth/dialectical-checkers"
 Issues = "https://github.com/ctoth/dialectical-checkers/issues"
 
+[project.scripts]
+dchk-match = "dialectical_checkers.cli.match_cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
