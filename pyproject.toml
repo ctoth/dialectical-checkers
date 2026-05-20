@@ -53,6 +53,7 @@ typeCheckingMode = "basic"
 venvPath = "."
 venv = ".venv"
 include = ["dialectical_checkers", "tests"]
+extraPaths = ["."]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -65,6 +66,7 @@ markers = [
 [dependency-groups]
 dev = [
     "hypothesis>=6.0",
+    "pydraughts>=0.6.7",
     "pyright>=1.1.390",
     "pytest>=8.0",
     "pytest-timeout>=2.3",
