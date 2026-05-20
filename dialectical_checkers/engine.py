@@ -1,11 +1,15 @@
 """Orchestration: probe -> graph -> choose, for dialectical checkers.
 
-Phase 0 shell. Copied in shape from ``dialectical_chess/engine.py`` and
-renamed for checkers (design §1, port-plan §8). It is a thin orchestrator:
-it probes the legal moves, builds the root argument graph, and selects a
-move. The probe and selection callees are Phase-0 skeletons that raise
-``NotImplementedError``; the real witness/graph/selection logic lands in
-Phases 3-4. Constructing the engine and importing it is fully supported now.
+Copied in shape from ``dialectical_chess/engine.py`` and renamed for checkers
+(design §1, port-plan §8). It is a thin orchestrator:
+``probe_moves(board)`` -> ``build_root_argument_graph`` (the crisp Dung layer,
+design §6) -> the FACT-tier selector (design §7) -> an :class:`EngineDecision`.
+
+Phase 3b makes the engine PLAY: ``analyze`` / ``choose_move`` run end to end.
+A position with **no legal move** is terminal — the game is over — and yields
+a *null* decision (empty ``move_pdn``, ``selected`` is ``None``). The graded
+Categoriser layer (design §7) is Phase 4; the engine wiring here does not
+change when it lands — only ``build_root_argument_graph`` / ``choose_move`` do.
 """
 
 from __future__ import annotations
@@ -65,10 +69,23 @@ class DialecticalCheckersEngine:
         self.settings = settings or EngineSettings()
 
     def analyze(self, board: Any) -> EngineAnalysis:
+        """Probe, build the crisp argument graph, and choose a move.
+
+        ``probe_moves`` yields one probe per legal move;
+        ``build_root_argument_graph`` is the crisp Dung layer (design §6);
+        ``choose_move`` applies the FACT-tier selector (design §7) over the
+        crisp survivors. A terminal position (no legal move, hence no probe)
+        yields a null :class:`EngineDecision` — the game is over.
+        """
         probes = tuple(probe_moves(board))
         graph = build_root_argument_graph(list(probes))
         selected = (
-            choose_move(list(probes), graph, selector_mode=self.settings.selector_mode)
+            choose_move(
+                list(probes),
+                graph,
+                selector_mode=self.settings.selector_mode,
+                board=board,
+            )
             if probes
             else None
         )
