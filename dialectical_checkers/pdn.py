@@ -108,12 +108,23 @@ def parse_move_token(token: str) -> CheckersMove:
     the captured set is *reconstructed* from the jump path geometry: a jump hop
     captures the square the geometry passes over (board.py ``JUMP`` table).
 
+    A token must use a *consistent* separator family: either the simple
+    separator ``-`` or the jump separators ``x``/``X`` — never both. A token
+    that mixes them (e.g. ``10x17-26``) is malformed and raises ``ValueError``.
+
     Raises ``ValueError`` for a malformed token.
     """
     text = token.strip()
     if not _MOVE_TOKEN_RE.match(text):
         raise ValueError(f"malformed PDN move token: {token!r}")
-    is_jump = "x" in text or "X" in text
+    has_simple_sep = "-" in text
+    has_jump_sep = "x" in text or "X" in text
+    if has_simple_sep and has_jump_sep:
+        raise ValueError(
+            f"PDN move token mixes simple ('-') and jump ('x') "
+            f"separators: {token!r}"
+        )
+    is_jump = has_jump_sep
     sep = "x" if is_jump else "-"
     raw_squares = re.split(r"[-xX]", text)
     try:

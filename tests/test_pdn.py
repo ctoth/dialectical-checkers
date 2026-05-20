@@ -69,6 +69,31 @@ def test_parse_move_token_rejects_malformed() -> None:
 
 
 @pytest.mark.unit
+def test_parse_move_token_rejects_mixed_separators() -> None:
+    """A token mixing ``-`` and ``x``/``X`` separators raises ``ValueError``.
+
+    A PDN move token must use a consistent separator family: either the simple
+    separator ``-`` or the jump separators ``x``/``X``. A mixed token such as
+    ``10x17-26`` or ``10-17x26`` must be rejected, not silently normalised into
+    a jump chain.
+    """
+    for bad in ("10x17-26", "10-17x26", "10X17-26", "10-17X26"):
+        with pytest.raises(ValueError):
+            parse_move_token(bad)
+
+
+@pytest.mark.unit
+def test_parse_move_token_accepts_consistent_separators() -> None:
+    """Valid single-family tokens still parse after the mixed-separator check."""
+    simple = parse_move_token("11-15")
+    assert simple == CheckersMove(path=(11, 15), captured=())
+    assert not simple.is_jump
+    jump = parse_move_token("11x20x27")
+    assert jump.path == (11, 20, 27)
+    assert jump.is_jump
+
+
+@pytest.mark.unit
 def test_parse_move_token_rejects_out_of_range_square() -> None:
     """A move token with a square outside 1-32 raises ``ValueError``."""
     with pytest.raises(ValueError):
