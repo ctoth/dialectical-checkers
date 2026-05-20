@@ -24,6 +24,7 @@ file, never by ``dialectical_checkers`` itself (the non-oracle-strength stance).
 from __future__ import annotations
 
 import random
+from dataclasses import dataclass
 
 import pytest
 
@@ -70,6 +71,29 @@ def _net_material(board: CheckersBoard, root_side: str) -> int:
     return _material(board, root_side) - _material(board, other)
 
 
+def _outcome_rank(
+    balance: int, terminal: str | None, root_side: str
+) -> tuple[int, int]:
+    """Total-order key for a capture-line outcome, from ``root_side``'s view.
+
+    Mirrors ``captures._outcome_rank`` deliberately — the reference must rank
+    outcomes the SAME way the resolver should: a forced terminal game-win
+    outranks any material outcome and a forced terminal game-loss is outranked
+    by any material outcome (the analyst's CRITICAL finding). Without this band
+    the reference would make the identical material-only mistake and so could
+    not catch the bug. The band (``+1`` root wins / ``0`` non-terminal / ``-1``
+    root loses) is the primary key; weighted material breaks ties only inside
+    the non-terminal band.
+    """
+    if terminal is None:
+        band = 0
+    elif terminal == root_side:
+        band = 1
+    else:
+        band = -1
+    return (band, balance)
+
+
 def brute_force_resolve(board: CheckersBoard) -> tuple[int, bool, str | None]:
     """Exact forced material outcome of ``board`` — the reference oracle.
 
@@ -84,8 +108,11 @@ def brute_force_resolve(board: CheckersBoard) -> tuple[int, bool, str | None]:
       game, else None.
 
     Naive recursion: at a node with captures the side to move picks the capture
-    that is best *for it* (minimax — the opponent minimises the root side's
-    balance); at a node with no captures the line is quiet and stops.
+    that is best *for it* under :func:`_outcome_rank` (minimax — the root side
+    maximises that key, the opponent minimises it). Terminal game-wins/losses
+    are banded above/below all material outcomes, so the reference, like the
+    resolver, never trades a forced win for a larger material swing. At a node
+    with no captures the line is quiet and stops.
     """
     root_side = board.turn
     start_balance = _net_material(board, root_side)
@@ -103,11 +130,16 @@ def brute_force_resolve(board: CheckersBoard) -> tuple[int, bool, str | None]:
         for mv in captures:
             results.append(best_balance(node.apply(mv)))
         if node_side == root_side:
-            # Root side moves: maximise the root-perspective balance.
-            chosen = max(results, key=lambda r: r[0])
+            # Root side moves: maximise the banded outcome rank — a terminal
+            # win beats any material gain, a material gain beats any loss.
+            chosen = max(
+                results, key=lambda r: _outcome_rank(r[0], r[2], root_side)
+            )
         else:
-            # Opponent moves: minimise the root-perspective balance.
-            chosen = min(results, key=lambda r: r[0])
+            # Opponent moves: minimise the same banded outcome rank.
+            chosen = min(
+                results, key=lambda r: _outcome_rank(r[0], r[2], root_side)
+            )
         # forced stays True: every node visited here had only captures.
         return chosen[0], True, chosen[2]
 
@@ -194,13 +226,44 @@ def _oracle_net(fen: str, root_side: str) -> int:
     return _oracle_material(fen, root_side) - _oracle_material(fen, other)
 
 
-def _replay_principal_line_in_oracle(board: CheckersBoard) -> tuple[str, int]:
-    """Replay the resolver's forced principal line move-by-move in pydraughts.
+#: pydraughts ``Board.winner()`` codes -> the engine's side letters. pydraughts
+#: BLACK (== engine Red, moves first) wins as ``1``; pydraughts WHITE (== engine
+#: white) wins as ``2``. Confirmed by scripts/probe_oracle_winner.py.
+_ORACLE_WINNER_TO_SIDE: dict[int, str] = {1: "r", 2: "w"}
 
-    Walks the engine's own capture minimax (same selection rule the resolver
-    uses), and at every step asserts the chosen move is legal in pydraughts.
-    Returns ``(final_fen, net_swing)`` — the oracle's FEN at the quiet position
-    and the material swing it implies, from the root side's perspective.
+
+@dataclass(frozen=True)
+class OracleReplay:
+    """The independent pydraughts verdict on a resolver's claimed line.
+
+    ``final_fen`` — pydraughts' FEN after replaying the claimed line.
+    ``net_swing`` — the material swing pydraughts reaches, root-side perspective.
+    ``terminal`` — the winner pydraughts reports at the final position (engine
+    side letter), or ``None`` if pydraughts says the game is not over there.
+    ``replayed`` — the PDN strings of every claimed move, all asserted legal.
+    """
+
+    final_fen: str
+    net_swing: int
+    terminal: str | None
+    replayed: tuple[str, ...]
+
+
+def _replay_claimed_line_in_oracle(
+    board: CheckersBoard, line: ResolvedLine
+) -> OracleReplay:
+    """Replay the resolver's CLAIMED principal line in pydraughts.
+
+    This is an INDEPENDENT cross-check (analyst MAJOR finding): it never calls
+    ``resolve`` to decide what to replay. The resolver hands over its claimed
+    ``line.principal_line``; this helper replays exactly those moves in
+    pydraughts, asserts each is legal there, and reports pydraughts' own
+    material swing and terminal verdict at the quiet position. The caller then
+    checks that verdict against the resolver's ``material_swing`` / ``terminal``
+    — pydraughts, not the resolver, decides whether the claim holds.
+
+    A claimed line is only meaningful if the result is not truncated; the
+    caller guards on that. Returns an :class:`OracleReplay`.
     """
     from draughts import Board as OracleBoard
 
@@ -209,41 +272,36 @@ def _replay_principal_line_in_oracle(board: CheckersBoard) -> tuple[str, int]:
     start_balance = _oracle_net(start_fen, root_side)
 
     oracle = OracleBoard(variant="english", fen=start_fen)
-    node = board
-    while True:
-        captures = [m for m in node.legal_moves() if m.is_jump]
-        if not captures:
-            break
-        node_side = node.turn
-
-        def line_value(mv: CheckersMove) -> int:
-            child = resolve(node.apply(mv))
-            # resolve returns swing from the child's root side; re-express as
-            # this node's swing by negating when the child root differs.
-            sign = 1 if node.apply(mv).turn == root_side else -1
-            return sign * child.material_swing
-
-        # Pick the move the resolver's minimax would pick at this node.
-        if node_side == root_side:
-            chosen = max(captures, key=lambda m: (line_value(m), m.pdn()))
-        else:
-            chosen = min(captures, key=lambda m: (line_value(m), m.pdn()))
-
+    replayed: list[str] = []
+    for move in line.principal_line:
         oracle_pdns = {
             ("x" if m.has_captures else "-").join(
                 str(s) for s in m.steps_move
             ): m
             for m in oracle.legal_moves()
         }
-        assert chosen.pdn() in oracle_pdns, (
-            f"resolver's forced move {chosen.pdn()} not legal in pydraughts "
-            f"at {node.to_fen()} (oracle moves {sorted(oracle_pdns)})"
+        assert move.pdn() in oracle_pdns, (
+            f"resolver's claimed move {move.pdn()} not legal in pydraughts "
+            f"(oracle moves {sorted(oracle_pdns)}, start {start_fen})"
         )
-        oracle.push(oracle_pdns[chosen.pdn()])
-        node = node.apply(chosen)
+        oracle.push(oracle_pdns[move.pdn()])
+        replayed.append(move.pdn())
 
     final_fen = oracle.fen
-    return final_fen, _oracle_net(final_fen, root_side) - start_balance
+    # pydraughts decides terminality independently: a side with no legal move
+    # has lost. ``winner()`` is only meaningful once the game is over, and may
+    # itself return ``None`` (a drawn or undecided game) — guard for it.
+    oracle_terminal: str | None = None
+    if oracle.is_over():
+        oracle_winner = oracle.winner()
+        if oracle_winner is not None:
+            oracle_terminal = _ORACLE_WINNER_TO_SIDE.get(oracle_winner)
+    return OracleReplay(
+        final_fen=final_fen,
+        net_swing=_oracle_net(final_fen, root_side) - start_balance,
+        terminal=oracle_terminal,
+        replayed=tuple(replayed),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +394,31 @@ CURATED_SHOTS: list[tuple[str, str, int]] = [
     #    and crowning; the crown ends the turn. Net = one man captured (100) +
     #    the crown bonus (50) = 150.
     ("crowning_capture", "B:W25:B21", MAN_VALUE + 50),
+    # --- king / deep coverage (analyst MINOR finding) -----------------------
+    # The six shots above are all man-captures with max forced depth 1 ply.
+    # The four below cover king captures, king multi-jumps, and a genuine 3-ply
+    # forced reply sequence. Each was hand-pinned and oracle-verified by
+    # scripts/verify_king_deep_shots.py (and scripts/search_deep_forced.py for
+    # the deep one) — a standalone banded minimax whose principal line is
+    # replayed in pydraughts.
+    #
+    # 7. King single capture: a lone Red KING on 15 takes White man 18
+    #    (15x22) — a king capture (kings move/capture any diagonal). White is
+    #    then out of pieces -> terminal Red win. Nets one man (100).
+    ("king_single_capture", "B:W18:BK15", MAN_VALUE),
+    # 8. King multi-jump: a Red KING on 2 chains 2x11x18, capturing White men
+    #    on 7 and 15 in one king multi-jump. Nets two men (200).
+    ("king_double_jump", "B:W7,15:BK2", 2 * MAN_VALUE),
+    # 9. King triple multi-jump: a Red KING on 14 chains 14x23x30x21, capturing
+    #    White men on 18, 25 and 26. Nets three men (300).
+    ("king_triple_jump", "B:W18,25,26:BK14", 3 * MAN_VALUE),
+    # 10. A genuine 3-PLY forced reply sequence (not one chained multi-jump):
+    #     Red 18x25, White forced 15x24 (a White-king recapture), Red forced
+    #     27x20 (a Red-king capture). Three separate forced plies; White ends
+    #     out of pieces -> terminal Red win. Net: Red captures White 22 and the
+    #     White king on 15/24 (man 100 + king 150 = 250) and loses its own man
+    #     on 18/25 (-100) -> +150.
+    ("deep_three_ply_king_finish", "B:WK15,22:B18,19,K27,31", MAN_VALUE + 50),
 ]
 
 
@@ -359,6 +442,116 @@ def test_curated_shot_outcomes(label: str, fen: str, expected: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# unit — terminal-vs-material conflict (analyst CRITICAL — direct tests)
+# ---------------------------------------------------------------------------
+#
+# The CRITICAL finding: a material-only minimax can choose a non-terminal
+# material gain over a forced terminal game-win (or, symmetrically at an
+# opponent node, miss a forced terminal loss). These tests are DIRECT — they
+# assert the resolver's outcome against hand/oracle-computed values, NOT against
+# the in-file brute-force reference. The reference shares the resolver's banded
+# ordering, so a differential test alone cannot prove the bug is fixed; a
+# material-only resolver would fail every assertion below. Each position was
+# independently verified in pydraughts by scripts/verify_terminal_conflict.py
+# and scripts/search_minimising_conflict.py.
+
+
+@pytest.mark.unit
+def test_terminal_win_outranks_larger_material_gain() -> None:
+    """A forced terminal game-win is chosen over a bigger material swing.
+
+    ``W:W13,14,21:B1,9`` — the analyst's oracle. White to move (the ROOT side, a
+    MAXIMISING node) has exactly two captures:
+
+    * ``13x6`` — initiates the forced line ``13x6``, ``1x10x17``, ``21x14``;
+      Red is then out of pieces, so White wins the GAME. Net material swing 0.
+    * ``14x5`` — captures one Red man, leaving ``B:W5,13,21:B1``, non-terminal,
+      material swing +100.
+
+    A material-only ``max`` would pick ``14x5`` (+100 > 0) and discard the win.
+    The fixed resolver bands any terminal win above any material outcome, so it
+    must report the forced terminal White win — ``terminal == "w"`` — and the
+    principal line must be the winning line, not the +100 grab.
+    """
+    board = CheckersBoard.from_fen("W:W13,14,21:B1,9")
+    line = resolve(board)
+    assert line.terminal == "w", "the forced terminal White win must be reported"
+    assert line.truncated is False
+    assert line.tier is Tier.FACT
+    assert line.material_swing == 0, "the winning line nets zero material"
+    assert [m.pdn() for m in line.principal_line] == ["13x6", "1x10x17", "21x14"]
+    # An independent pydraughts replay of the resolver's CLAIMED line confirms
+    # the terminal verdict — White wins, Red has no piece left.
+    replay = _replay_claimed_line_in_oracle(board, line)
+    assert replay.terminal == "w", replay.final_fen
+    assert replay.net_swing == 0, replay.final_fen
+
+
+@pytest.mark.unit
+def test_terminal_win_outranks_material_gain_red_to_move() -> None:
+    """The same conflict with Red as the root side — colour-symmetric.
+
+    ``B:W32,24:B20,19,12`` — Red to move (ROOT, MAXIMISING node). ``19x28``
+    grabs one White man non-terminally (+100); ``20x27`` initiates the forced
+    line ``20x27``, ``32x23x16``, ``12x19`` that leaves White with no piece —
+    a terminal RED win, material swing 0. A material-only ``max`` would take
+    the +100 grab; the resolver must report the terminal Red win.
+    """
+    board = CheckersBoard.from_fen("B:W32,24:B20,19,12")
+    line = resolve(board)
+    assert line.terminal == "r", "the forced terminal Red win must be reported"
+    assert line.truncated is False
+    assert line.tier is Tier.FACT
+    assert line.material_swing == 0
+    assert [m.pdn() for m in line.principal_line] == [
+        "20x27",
+        "32x23x16",
+        "12x19",
+    ]
+    replay = _replay_claimed_line_in_oracle(board, line)
+    assert replay.terminal == "r", replay.final_fen
+    assert replay.net_swing == 0, replay.final_fen
+
+
+@pytest.mark.unit
+def test_opponent_terminal_win_outranks_its_material_gain() -> None:
+    """A MINIMISING (opponent) node picks its terminal win over a bigger grab.
+
+    The CRITICAL defect is symmetric — it must be fixed at opponent nodes too.
+
+    ``B:W15,K17,23,K24:B11,27`` — Red to move (ROOT). Red is forced into the
+    single capture ``11x18``. After it White — the opponent, a MINIMISING node
+    for the root Red balance — has a choice of captures:
+
+    * ``23x14`` merely nets White material, non-terminal;
+    * ``24x31`` initiates the forced line ``24x31``, ``18x27``, ``31x24`` that
+      leaves Red with no piece — a terminal WHITE win, i.e. a root (Red) LOSS.
+
+    A material-only ``min`` minimises the root balance and would pick ``23x14``,
+    missing White's forced win. The fixed resolver bands a root loss below every
+    material outcome, so the minimising node selects ``24x31`` and the result
+    reports ``terminal == "w"`` — the forced game loss for the root side. Found
+    and oracle-verified by scripts/search_minimising_conflict.py.
+    """
+    board = CheckersBoard.from_fen("B:W15,K17,23,K24:B11,27")
+    line = resolve(board)
+    assert line.terminal == "w", (
+        "the opponent's forced terminal win (a root loss) must be reported"
+    )
+    assert line.truncated is False
+    assert line.tier is Tier.FACT
+    assert [m.pdn() for m in line.principal_line] == [
+        "11x18",
+        "24x31",
+        "18x27",
+        "31x24",
+    ]
+    replay = _replay_claimed_line_in_oracle(board, line)
+    assert replay.terminal == "w", replay.final_fen
+    assert replay.net_swing == line.material_swing, replay.final_fen
+
+
+# ---------------------------------------------------------------------------
 # differential — pydraughts cross-check of the principal line (directive)
 # ---------------------------------------------------------------------------
 
@@ -370,29 +563,39 @@ def test_curated_shot_outcomes(label: str, fen: str, expected: int) -> None:
     ids=[c[0] for c in CURATED_SHOTS],
 )
 def test_curated_shots_match_pydraughts(label: str, fen: str, expected: int) -> None:
-    """Replay the resolver's forced line in pydraughts; outcome must match.
+    """Replay the resolver's CLAIMED line in pydraughts; outcome must match.
 
-    Every move the resolver's minimax would play is asserted legal in
-    pydraughts, and the final material swing pydraughts reaches equals the
-    resolver's ``material_swing``.
+    The resolver's own ``principal_line`` is replayed move-by-move in
+    pydraughts (the helper never re-runs ``resolve`` to choose moves — analyst
+    MAJOR finding). Every claimed move must be legal in pydraughts, the final
+    material swing pydraughts reaches must equal the resolver's
+    ``material_swing``, and pydraughts' terminal verdict must equal the
+    resolver's ``terminal``.
     """
     board = CheckersBoard.from_fen(fen)
     line = resolve(board)
-    final_fen, oracle_swing = _replay_principal_line_in_oracle(board)
-    assert oracle_swing == expected, f"{label}: oracle swing {oracle_swing}"
-    assert oracle_swing == line.material_swing, (
-        f"{label}: resolver {line.material_swing} != oracle {oracle_swing} "
-        f"(final {final_fen})"
+    replay = _replay_claimed_line_in_oracle(board, line)
+    assert replay.net_swing == expected, (
+        f"{label}: oracle swing {replay.net_swing} (final {replay.final_fen})"
+    )
+    assert replay.net_swing == line.material_swing, (
+        f"{label}: resolver {line.material_swing} != oracle {replay.net_swing} "
+        f"(final {replay.final_fen})"
+    )
+    assert replay.terminal == line.terminal, (
+        f"{label}: resolver terminal {line.terminal!r} != oracle "
+        f"{replay.terminal!r} (final {replay.final_fen})"
     )
 
 
 @pytest.mark.differential
 def test_multi_capture_positions_match_pydraughts() -> None:
-    """Resolver's forced line is legal & outcome-correct in pydraughts.
+    """Resolver's CLAIMED line is legal & outcome-correct in pydraughts.
 
-    A set of capture-rich positions: the resolver's principal line is replayed
-    move-by-move in pydraughts; each step must be legal and the final material
-    swing must equal the resolver's claim.
+    A set of capture-rich positions: the resolver's own ``principal_line`` is
+    replayed move-by-move in pydraughts; each step must be legal, the final
+    material swing must equal the resolver's claim, and pydraughts' terminal
+    verdict must equal the resolver's ``terminal``.
     """
     multi_capture_fens = [
         "B:W16,24:B11",  # double jump
@@ -407,10 +610,14 @@ def test_multi_capture_positions_match_pydraughts() -> None:
         line = resolve(board)
         if line.truncated:
             continue  # truncated lines make no exact claim
-        final_fen, oracle_swing = _replay_principal_line_in_oracle(board)
-        assert oracle_swing == line.material_swing, (
-            f"{fen}: resolver {line.material_swing} != oracle {oracle_swing} "
-            f"(final {final_fen})"
+        replay = _replay_claimed_line_in_oracle(board, line)
+        assert replay.net_swing == line.material_swing, (
+            f"{fen}: resolver {line.material_swing} != oracle "
+            f"{replay.net_swing} (final {replay.final_fen})"
+        )
+        assert replay.terminal == line.terminal, (
+            f"{fen}: resolver terminal {line.terminal!r} != oracle "
+            f"{replay.terminal!r} (final {replay.final_fen})"
         )
 
 

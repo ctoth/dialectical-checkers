@@ -92,6 +92,12 @@ class ResolvedLine:
     position ends the game, else ``None``.
 
     ``tier`` — ``Tier.FACT`` iff not truncated, else ``Tier.HEURISTIC``.
+
+    ``principal_line`` — the exact sequence of capture moves the minimax
+    selected, from the root to the quiet position it resolved to. Empty for a
+    quiet root. This is the resolver's *claimed* line: a cross-check (e.g. the
+    pydraughts replay in the test suite) can replay these moves and verify the
+    claim independently, without re-running the resolver's selection.
     """
 
     material_swing: int
@@ -99,6 +105,7 @@ class ResolvedLine:
     truncated: bool
     terminal: str | None
     tier: Tier
+    principal_line: tuple[CheckersMove, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -149,24 +156,67 @@ class _Budget:
     hit: bool = False
 
 
+def _outcome_rank(balance: int, terminal: str | None, root_side: str) -> tuple[int, int]:
+    """Total-order key for a capture-line outcome, from ``root_side``'s view.
+
+    The minimax must NOT rank outcomes on material alone (the analyst's
+    CRITICAL finding): a forced terminal *game* win is worth more than any
+    material gain, and a forced terminal *game* loss is worse than any material
+    loss. So an outcome is ranked first by a three-valued **terminal band** and
+    only then, within the non-terminal band, by weighted material:
+
+    * band ``+1`` — the resolved quiet position is terminal and ``root_side``
+      wins the GAME. Outranks every non-terminal and every losing outcome.
+    * band ``0`` — non-terminal (including a budget-truncated line, which
+      claims no terminal). Ranked among itself by ``balance``.
+    * band ``-1`` — terminal and ``root_side`` loses the GAME. Outranked by
+      every non-terminal and every winning outcome.
+
+    The returned ``(band, balance)`` tuple is a total order: comparing it with
+    ``>`` / ``<`` gives terminal-dominates-material at both kinds of node. A
+    maximising (root-side) node takes the ``max`` of this key — it prefers any
+    win and avoids any loss; a minimising (opponent) node takes the ``min`` —
+    it prefers handing ``root_side`` a loss and avoids handing it a win. The
+    defect is therefore fixed symmetrically by one shared ordering.
+    """
+    if terminal is None:
+        band = 0
+    elif terminal == root_side:
+        band = 1
+    else:
+        band = -1
+    return (band, balance)
+
+
 def _resolve_balance(
     node: CheckersBoard,
     root_side: str,
     depth: int,
     budget: _Budget,
-) -> tuple[int, str | None]:
+) -> tuple[int, str | None, tuple[CheckersMove, ...]]:
     """Best end-balance reachable from ``node`` by capture-only play.
 
-    Returns ``(balance, terminal)`` — the weighted material balance from
+    Returns ``(balance, terminal, line)`` — the weighted material balance from
     ``root_side``'s perspective at the quiet position the mandatory-capture
-    minimax resolves to, and the winning side if that position is terminal.
+    minimax resolves to, the winning side if that position is terminal, and
+    ``line``, the exact sequence of capture moves the minimax selected from
+    ``node`` down to that quiet position.
 
-    Minimax: at a node where the *root* side is to move it maximises the
-    root-perspective balance; at an opponent node it minimises it. Only capture
-    moves are followed — a node with no capture is *quiet* and the recursion
-    stops there. The budget bounds both depth and node count; when it is hit
-    ``budget.hit`` is set and the current node is treated as quiet (its static
-    balance is returned), so the caller can mark the line truncated.
+    Minimax over the :func:`_outcome_rank` total order: at a node where the
+    *root* side is to move it maximises that key; at an opponent node it
+    minimises it. Because the key bands a terminal game-win above every
+    material outcome and a terminal game-loss below every material outcome,
+    a forced win is never discarded for a larger material swing and a forced
+    loss is never preferred over a material loss — at BOTH node kinds. Only
+    capture moves are followed — a node with no capture is *quiet* and the
+    recursion stops there. The budget bounds both depth and node count; when it
+    is hit ``budget.hit`` is set and the current node is treated as quiet (its
+    static balance is returned, terminal ``None``, empty line), so the caller
+    can mark the line truncated.
+
+    Tie-breaking is deterministic: when two children share the same outcome
+    rank the first in ``legal_moves()`` order (already sorted) is kept, so the
+    reported ``line`` is reproducible.
     """
     moves = node.legal_moves()
     captures = [m for m in moves if m.is_jump]
@@ -175,35 +225,44 @@ def _resolve_balance(
         # Quiet node — the capture sequence has resolved here. A node with no
         # legal move at all is terminal: the side to move loses.
         terminal = node.winner() if not moves else None
-        return _net_material(node, root_side), terminal
+        return _net_material(node, root_side), terminal, ()
 
     if depth >= budget.max_depth or budget.nodes_left <= 0:
         # Budget exhausted: stop and report the static balance. Honest — the
         # line is truncated, the caller will mark it HEURISTIC.
         budget.hit = True
-        return _net_material(node, root_side), None
+        return _net_material(node, root_side), None, ()
 
     node_side = node.turn
     best_balance: int | None = None
     best_terminal: str | None = None
+    best_rank: tuple[int, int] | None = None
+    best_line: tuple[CheckersMove, ...] = ()
     for move in captures:
         budget.nodes_left -= 1
         child = node.apply(move)
-        balance, terminal = _resolve_balance(
+        balance, terminal, sub_line = _resolve_balance(
             child, root_side, depth + 1, budget
         )
-        if best_balance is None:
-            best_balance, best_terminal = balance, terminal
+        rank = _outcome_rank(balance, terminal, root_side)
+        if best_rank is None:
+            best_balance, best_terminal, best_rank = balance, terminal, rank
+            best_line = (move, *sub_line)
         elif node_side == root_side:
-            if balance > best_balance:
-                best_balance, best_terminal = balance, terminal
+            # Root side: prefer the highest-ranked outcome (any terminal win
+            # over any material; any material over any terminal loss).
+            if rank > best_rank:
+                best_balance, best_terminal, best_rank = balance, terminal, rank
+                best_line = (move, *sub_line)
         else:
-            if balance < best_balance:
-                best_balance, best_terminal = balance, terminal
+            # Opponent: prefer the lowest-ranked outcome for the root side.
+            if rank < best_rank:
+                best_balance, best_terminal, best_rank = balance, terminal, rank
+                best_line = (move, *sub_line)
 
-    # ``captures`` is non-empty, so ``best_balance`` was assigned.
+    # ``captures`` is non-empty, so the best outcome was assigned.
     assert best_balance is not None
-    return best_balance, best_terminal
+    return best_balance, best_terminal, best_line
 
 
 def resolve(
@@ -226,7 +285,7 @@ def resolve(
     budget = _Budget(nodes_left=max_nodes, max_depth=max_depth)
 
     start_balance = _net_material(board, root_side)
-    end_balance, terminal = _resolve_balance(board, root_side, 0, budget)
+    end_balance, terminal, line = _resolve_balance(board, root_side, 0, budget)
 
     truncated = budget.hit
     # Every node the minimax descends through is a capture node, and captures
@@ -242,6 +301,7 @@ def resolve(
         truncated=truncated,
         terminal=terminal,
         tier=Tier.HEURISTIC if truncated else Tier.FACT,
+        principal_line=line,
     )
 
 
@@ -315,7 +375,7 @@ def own_shot(
     # the balance from the MOVER's perspective so the swing spans ``move``
     # itself. ``before`` is the balance at the root position (before ``move``).
     before = _net_material(board, mover)
-    end_balance, terminal = _resolve_balance(after, mover, 0, budget)
+    end_balance, terminal, _line = _resolve_balance(after, mover, 0, budget)
     truncated = budget.hit
     mover_swing = end_balance - before
     wins_game = terminal == mover

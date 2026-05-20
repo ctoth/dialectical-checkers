@@ -136,7 +136,105 @@ None.
     tree (both sides recapture across separate plies) to exercise truncation.
 
 ### Current blocker / next step
-Need a position whose capture MINIMAX TREE is genuinely multi-node so a tiny
-budget truncates it. Multi-jumps are single moves; need cross-ply recapture
-chains. Writing scripts/find_truncation_position.py to search seeded walks for
-a position whose resolve() node count > N, then use it in the truncation test.
+RESOLVED. find_truncation_position.py found
+W:W18,22,23,24,26,27,28,30,32:B1,3,4,5,7,11,12,14,19 — a 48-node capture tree.
+Tiny budget -> swing 200 truncated HEURISTIC; full -> swing 100 truncated=False
+FACT. Used in both budget tests; truncated swing genuinely != true swing, so
+the "not a false FACT" test is meaningful.
+
+### DONE — Phase 2 complete
+- All gates pass: uv sync ok; uv run pytest = 88 passed; uv run pyright =
+  0 errors. captures.py tests = 26 (17 unit, 2 property, 7 differential).
+- Differential: 302 seeded positions (98 with forced captures), every
+  non-truncated resolver result == brute-force reference, 0 mismatches.
+- Committed on master: 986a6c151a76f26d79b49148a43b1d5e31fe9ff2
+  "Phase 2: forced-capture resolver".
+- No blockers. No design under-specification beyond the sign/quiet/forced
+  conventions already pinned above and confirmed by the brute-force reference.
+
+## 2026-05-20 — Phase 2 FIX cycle (gauntlet Coder)
+
+### Analyst findings to fix (reports/phase2-captures-analyst.md)
+- CRITICAL captures.py:197-202: `_resolve_balance()` minimaxes on material only;
+  can pick a non-terminal material gain over a forced terminal win, dropping the
+  win. Fix: rank outcomes so ANY terminal win > ANY material outcome > ANY
+  terminal loss, from ROOT side perspective; material swing tiebreaks the
+  non-terminal band. Both max and min nodes. terminal must propagate.
+  Oracle: W:W13,14,21:B1,9 must report terminal White win.
+- MAJOR test_captures.py:219-230: pydraughts replay helper uses resolve() to
+  pick the line; not independent. Make it verify the resolver's CLAIMED line.
+- MINOR: 6 curated shots all man-captures; add king captures, king multi-jump
+  shot, 3+ ply forced reply.
+
+### Plan (no discretion — root-cause per directives)
+1. Introduce an outcome-ordering key in _resolve_balance: represent each
+   capture-line outcome as a comparable value with (terminal-band, material).
+   Band: root-win=+1, none=0, root-loss=-1. Compare (band, material) so a
+   terminal win dominates any material; loss is dominated. Carry terminal.
+2. Mirror the SAME ordering in brute_force_resolve's max/min keys.
+3. Add direct terminal-conflict unit tests (oracle position + symmetric
+   opponent-terminal-win) verified by pydraughts/hand computation.
+4. Rewrite _replay_principal_line_in_oracle to take the resolver's CLAIMED
+   line, not recompute selection via resolve().
+5. Add curated king/deep shots verified by a new script.
+
+### State
+- Baseline: uv sync ok, uv run pytest = 88 passed, uv run pyright 0 errors.
+- Working on master, no branch (per directive).
+
+### Progress (fix execution)
+- probe_terminal_conflict.py confirms: OLD resolve(W:W13,14,21:B1,9) =
+  swing=100 terminal=None; 13x6 is terminal 'w' swing 0, 14x5 is +100 non-term.
+- CRITICAL FIX in captures.py: added `_outcome_rank(balance, terminal,
+  root_side)` -> (band, balance) with band +1/0/-1 (root-win/none/root-loss).
+  _resolve_balance now minimaxes on this key at BOTH max and min nodes.
+  AFTER fix: resolve(W:W13,14,21:B1,9) = swing=0 terminal='w' FACT. CONFIRMED.
+- Mirrored `_outcome_rank` into tests/test_captures.py brute_force_resolve
+  (max/min keys now use the band).
+- MAJOR FIX in progress: added `principal_line: tuple[CheckersMove,...]` field
+  to ResolvedLine; _resolve_balance now returns (balance, terminal, line).
+  STILL TO DO: update resolve() and own_shot() callers (3-tuple unpack);
+  rewrite _replay_principal_line_in_oracle to replay line.principal_line.
+- TODO: direct terminal-conflict tests; curated king/deep shots + verify script.
+
+### pydraughts terminal API (probed)
+- After replaying claimed line, OracleBoard.is_over() True, legal_moves() empty.
+- oracle.winner() is a METHOD returning int: 1 == engine Red, 2 == engine White.
+- captures.py callers updated (resolve, own_shot) for 3-tuple. pyright 0,
+  test_captures 26 passed. CRITICAL + brute-force-ref mirror done.
+- NEXT: rewrite _replay_principal_line_in_oracle to replay
+  ResolvedLine.principal_line (no resolve()-per-candidate); update its 2
+  callers; add direct terminal-conflict tests; curated king/deep shots.
+
+### Blockers
+None.
+
+
+### MAJOR fix done (2026-05-20)
+- Replaced _replay_principal_line_in_oracle with _replay_claimed_line_in_oracle:
+  takes (board, line:ResolvedLine), replays line.principal_line in pydraughts,
+  asserts each move legal, returns OracleReplay(final_fen, net_swing, terminal,
+  replayed). Never calls resolve() to choose. Both callers updated; they now
+  also assert oracle terminal == resolver terminal.
+- pyright: fixed winner()->int|None guard. test_captures 26 passed.
+- NEXT: direct terminal-conflict tests; curated king/deep shots + verify script.
+
+### Terminal-conflict test positions (oracle-verified 2026-05-20)
+- maximising/root White: W:W13,14,21:B1,9 -> swing 0, terminal 'w'.
+- maximising/root Red mirror: B:W32,24:B20,19,12 -> swing 0, terminal 'r'.
+- minimising/opponent: B:W15,K17,23,K24:B11,27 -> root Red, opponent White
+  (minimising node) picks terminal win; resolve terminal 'w'.
+  All three: material-only rule MISSES the terminal; banded rule gets it.
+  All replayed in pydraughts (search_minimising_conflict.py + verify script).
+- NEXT: add direct unit tests for these 3; add curated king/deep shots.
+
+### All 3 findings fixed — gate green (2026-05-20)
+- CRITICAL: _outcome_rank banding in captures.py + brute_force_resolve; oracle
+  W:W13,14,21:B1,9 now resolve()=swing 0 terminal 'w'. 3 direct unit tests
+  (max/root White, max/root Red mirror, min/opponent White).
+- MAJOR: _replay_claimed_line_in_oracle replays resolver's principal_line;
+  no resolve()-to-select. Both differential tests also assert oracle terminal.
+- MINOR: 4 curated king/deep shots added to CURATED_SHOTS (king single, king
+  double, king triple multi-jump, 3-ply forced sequence). All oracle-verified.
+- uv sync ok; uv run pytest = 99 passed (was 88, +11); uv run pyright 0 errors.
+- NEXT: commit on master, write report.
