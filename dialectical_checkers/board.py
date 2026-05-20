@@ -96,6 +96,11 @@ STEP, JUMP = _build_tables()
 #: A cell holding a piece: ``(colour, is_king)``; ``colour`` is "r" or "w".
 Cell = tuple[str, bool]
 
+#: A repeatable-position identity: ``(cells, turn)``. Used as-is for
+#: threefold-repetition detection — a stable, deterministic, collision-free
+#: value (never a process-randomized hash).
+PositionId = tuple[tuple["Cell | None", ...], str]
+
 _KING_ROW = {"r": RED_KING_ROW, "w": WHITE_KING_ROW}
 _OPPONENT = {"r": "w", "w": "r"}
 
@@ -161,14 +166,14 @@ class CheckersBoard:
     ``cells`` is a length-32 tuple indexed by internal index (PDN - 1); each
     entry is ``None`` or ``(colour, is_king)``. ``turn`` is ``"r"`` or ``"w"``
     (Red moves first). ``no_progress`` counts plies since the last man move or
-    capture. ``history`` holds position hashes for threefold-repetition
-    detection.
+    capture. ``history`` holds the position *identities* — the stable
+    ``(cells, turn)`` tuples — for threefold-repetition detection.
     """
 
     cells: tuple[Cell | None, ...] = field(default_factory=_initial_cells)
     turn: str = "r"
     no_progress: int = 0
-    history: tuple[int, ...] = ()
+    history: tuple[PositionId, ...] = ()
 
     # -- construction --------------------------------------------------------
 
@@ -176,13 +181,21 @@ class CheckersBoard:
     def initial(cls) -> CheckersBoard:
         """Return the standard WCDF starting position, Red to move."""
         board = cls(cells=_initial_cells(), turn="r", no_progress=0, history=())
-        return replace(board, history=(board._position_hash(),))
+        return replace(board, history=(board._position_id(),))
 
-    # -- hashing -------------------------------------------------------------
+    # -- position identity ---------------------------------------------------
 
-    def _position_hash(self) -> int:
-        """A hash of (cells, turn) — the repeatable-position identity."""
-        return hash((self.cells, self.turn))
+    def _position_id(self) -> PositionId:
+        """The repeatable-position identity ``(cells, turn)`` (design §2.6).
+
+        Stored verbatim in ``history`` — a stable, deterministic, collision-free
+        tuple. It deliberately does NOT call ``hash``: Python's string hash is
+        process-randomized, so a hash would make repetition detection
+        collision-prone and persisted/debugged histories unstable across runs.
+        ``cells`` and ``turn`` are themselves immutable and hashable, so the
+        tuple works directly as a dict/set key and ``tuple.count`` comparand.
+        """
+        return (self.cells, self.turn)
 
     # -- move generation -----------------------------------------------------
 
@@ -269,11 +282,23 @@ class CheckersBoard:
             over_cell = self.cells[over]
             if over_cell is None or over_cell[0] != opponent:
                 continue
-            land_cell = self.cells[land]
-            # Landing square must be empty AND not an already-captured square:
-            # captured pieces are removed only at sequence end (WCDF 1.19), so
-            # their squares stay occupied during expansion.
-            if land_cell is not None or land in captured:
+            # The landing square must be vacant *in the mid-jump board state*,
+            # which is NOT ``self.cells`` (the static original board):
+            #
+            #  * the moving piece's own origin square (``path[0]``) is empty
+            #    after the first hop — the piece left it — even though
+            #    ``self.cells`` still shows it occupied. A legal circular king
+            #    jump may land back on that now-empty origin, so it must not be
+            #    treated as blocked (WCDF 1.19/1.20).
+            #  * captured pieces are removed only at sequence end (WCDF 1.19),
+            #    so an already-captured square stays occupied and un-landable
+            #    during expansion — tracked by ``captured``, not ``self.cells``.
+            #  * every other square is read from ``self.cells`` as usual; the
+            #    intermediate landing squares of ``path`` were empty to begin
+            #    with and the piece has since vacated them.
+            origin = path[0]
+            land_occupied = self.cells[land] is not None and land != origin
+            if land_occupied or land in captured:
                 continue
             extended = True
             new_path = path + [land]
@@ -312,7 +337,7 @@ class CheckersBoard:
         Moves the piece along ``path``, removes ``captured`` at the end, crowns
         a man that finished on its king-row, flips ``turn``, updates the
         no-progress counter (reset to 0 on any man move or any capture, else
-        +1), and appends the new position hash to ``history``.
+        +1), and appends the new position identity to ``history``.
         """
         side = self.turn
         origin = move.origin - 1
@@ -347,7 +372,7 @@ class CheckersBoard:
             history=self.history,
         )
         return replace(
-            new_board, history=self.history + (new_board._position_hash(),)
+            new_board, history=self.history + (new_board._position_id(),)
         )
 
     # -- terminal & draw -----------------------------------------------------
@@ -444,13 +469,25 @@ class CheckersBoard:
                 raise ValueError(f"PDN-FEN field {field_text!r} has wrong tag")
             if not body:
                 return
-            for token in body.split(","):
-                token = token.strip()
+            for raw_token in body.split(","):
+                token = raw_token.strip()
                 if not token:
-                    continue
+                    # An empty list element — produced by a doubled comma
+                    # (``W1,,2``), a leading comma (``W,1``) or a trailing
+                    # comma (``W1,``) — is malformed PDN-FEN, not an empty
+                    # list. Reject it rather than silently dropping it.
+                    raise ValueError(
+                        f"empty square token in PDN-FEN field {field_text!r}: "
+                        f"{fen!r}"
+                    )
                 is_king = token.startswith("K")
                 number_text = token[1:] if is_king else token
-                pdn = int(number_text)
+                try:
+                    pdn = int(number_text)
+                except ValueError:
+                    raise ValueError(
+                        f"non-numeric PDN square token {token!r} in {fen!r}"
+                    ) from None
                 if not 1 <= pdn <= NUM_SQUARES:
                     raise ValueError(f"PDN square {pdn} out of range in {fen!r}")
                 if cells[pdn - 1] is not None:
@@ -461,7 +498,7 @@ class CheckersBoard:
         place(second, "r")
 
         board = cls(cells=tuple(cells), turn=turn, no_progress=0, history=())
-        return replace(board, history=(board._position_hash(),))
+        return replace(board, history=(board._position_id(),))
 
 
 # --- perft ------------------------------------------------------------------

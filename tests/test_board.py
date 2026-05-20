@@ -80,6 +80,12 @@ EDGE_CASES: list[tuple[str, str]] = [
     ("crowning_ends_turn", "B:W25,26:B21"),
     ("no_move_is_a_loss", "B:W5,6,9,10:B1"),
     ("multi_jump_double", "B:W16,24:B11"),
+    # King-specific differential cases (directive 3). A man cannot reach any of
+    # these, so they exercise the king capture surface the analyst flagged as
+    # uncovered. All three are oracle-confirmed against pydraughts English.
+    ("king_backward_capture", "B:W18:BK22"),
+    ("king_multi_jump", "B:W7,15,23,24:BK2"),
+    ("king_loop_capture", "B:W17,18,25,26:BK14"),
 ]
 
 
@@ -187,42 +193,74 @@ def test_shorter_capture_allowed() -> None:
 
 
 @pytest.mark.unit
-def test_captured_square_blocks_landing() -> None:
-    """A jump cannot land on an already-captured square (WCDF 1.19).
+def test_captured_square_stays_occupied_during_chain() -> None:
+    """A captured piece stays on the board, un-jumpable, until the chain ends.
 
-    Red man on 15 jumps White 18, landing on 22; a further jump would need to
-    pass over White 11 — but 11 is backward for a Red man, so no chain. The
-    test position checks that landing/blocking respects occupancy: the captured
-    piece stays put during expansion. Concretely, Red man on 15 with White on
-    18 (jumpable) and White on 11 (a backward piece, not jumpable) — the engine
-    must produce exactly the single forward jump.
+    WCDF 1.19: captured pieces are removed only when the whole multi-jump
+    sequence terminates. This is a REAL multi-jump continuation that proves it.
+
+    Red king on 14 sits inside a closed ring of four White men 17,18,25,26.
+    The full forced chain is ``14x23x30x21`` (jump 18->23, 25->30, 26->21).
+    After the king lands on 21 it is again diagonally adjacent to White 18 with
+    landing square 14 — but 18 was already captured earlier in this very
+    sequence. Because the captured piece is still on square 18 (occupied, but
+    flagged un-jumpable), the king CANNOT re-jump it and the chain ends at 21.
+
+    If captured pieces were removed eagerly, square 18 would be empty and the
+    king would (illegally) keep looping. The pydraughts oracle confirms the
+    chain is exactly ``14x23x30x21`` — three captures, terminating at 21.
     """
-    board = CheckersBoard.from_fen("B:W18,11:B15")
+    fen = "B:W18,25,26:BK14"
+    board = CheckersBoard.from_fen(fen)
     moves = board.legal_moves()
     assert len(moves) == 1
-    assert moves[0].pdn() == "15x22"
-    assert moves[0].captured == (18,)
+    assert moves[0].pdn() == "14x23x30x21"
+    # ``captured`` is in jump-sequence order: 18 jumped first (king lands 23),
+    # then 26 (lands 30), then 25 (lands 21).
+    assert moves[0].captured == (18, 26, 25)
+    assert set(moves[0].captured) == {18, 25, 26}
+    # No captured square is jumped twice — the un-jumpable flag held.
+    assert len(set(moves[0].captured)) == len(moves[0].captured)
+    # The oracle is the arbiter of the WCDF 1.19 end-of-sequence rule here.
+    assert pdn_set(board) == oracle_pdn_set(fen)
+    # After the move every captured man is gone and only the Red king remains.
+    after = board.apply(moves[0])
+    for cap in (18, 25, 26):
+        assert after.cells[cap - 1] is None
+    assert after.cells[21 - 1] == ("r", True)
 
 
 @pytest.mark.unit
-def test_captured_pieces_block_landing_in_chain() -> None:
-    """During a multi-jump the captured square stays occupied — cannot re-land.
+def test_circular_king_jump_lands_on_emptied_origin() -> None:
+    """A king multi-jump may close a loop back onto its now-empty origin.
 
-    A king on a ring of enemy pieces must not loop back onto a square whose
-    occupant it already captured. Construct a king that, after one jump, has a
-    geometric continuation whose landing square is the square it started from
-    (now empty) — and verify it does not re-jump a piece already captured.
+    WCDF 1.19/1.20: a started multi-jump continues until no capture remains.
+    Red king on 14 inside the full ring of four White men 17,18,25,26: the
+    king jumps all four and returns to its origin square 14, which is empty
+    after the first hop. The captured pieces stay occupied during expansion
+    (so they cannot be re-jumped), but the origin square does not.
+
+    The engine must produce exactly the two four-capture loop sequences, each
+    ending back on 14, matching the pydraughts oracle. Before this fix the
+    engine read landing squares off the static original board, so square 14
+    appeared occupied and the loop was truncated one capture early.
     """
-    # Red king on 15, White men on 18 and 11. King captures 18 -> lands 22.
-    # From 22 there is no further capture (11 is reachable only by re-crossing,
-    # and 11 itself would need a piece beyond it). Single clean jump expected.
-    board = CheckersBoard.from_fen("B:W18:BK15")
-    moves = board.legal_moves()
-    assert len(moves) == 1
-    assert moves[0].captured == (18,)
-    # Each captured square appears at most once in the sequence.
-    for m in moves:
-        assert len(set(m.captured)) == len(m.captured)
+    fen = "B:W17,18,25,26:BK14"
+    board = CheckersBoard.from_fen(fen)
+    pdns = pdn_set(board)
+    assert pdns == {"14x21x30x23x14", "14x23x30x21x14"}
+    assert pdns == oracle_pdn_set(fen)
+    for m in board.legal_moves():
+        # Every loop captures all four men exactly once and returns to 14.
+        assert len(m.captured) == 4
+        assert len(set(m.captured)) == 4
+        assert m.origin == 14
+        assert m.destination == 14
+        # Applying the loop empties the four rings and re-seats the king on 14.
+        after = board.apply(m)
+        for cap in (17, 18, 25, 26):
+            assert after.cells[cap - 1] is None
+        assert after.cells[14 - 1] == ("r", True)
 
 
 @pytest.mark.unit
@@ -421,10 +459,14 @@ def test_property_apply_yields_valid_board(seed: int) -> None:
                     colour, is_king = cell
                     assert colour in ("r", "w")
                     assert isinstance(is_king, bool)
-            # The mover left its origin and occupies its destination.
-            assert after.cells[move.origin - 1] is None
+            # The mover occupies its destination; it left its origin unless
+            # the move is a circular king jump that lands back on its origin
+            # square (a legal multi-jump — see the king-loop edge cases).
             assert after.cells[move.destination - 1] is not None
-            # Captured squares are now empty.
+            if move.origin != move.destination:
+                assert after.cells[move.origin - 1] is None
+            # Captured squares are now empty. (For a circular jump the origin
+            # is never a captured square, so this does not conflict above.)
             for cap in move.captured:
                 assert after.cells[cap - 1] is None
             # Piece conservation: the captured side (the side to move on the
@@ -514,3 +556,108 @@ def test_differential_random_walk() -> None:
             if board.is_draw():
                 break
     assert positions_checked >= 300, positions_checked
+
+
+@pytest.mark.differential
+def test_differential_oracle_driven_walk() -> None:
+    """A 300+ position seeded walk that steps along PYDRAUGHTS' chosen moves.
+
+    The engine-following walk (``test_differential_random_walk``) has a blind
+    spot the analyst named: it advances along the *engine's* generated moves,
+    so if the engine omits a legal continuation that move is simply never
+    taken and the omission stays invisible.
+
+    This walk closes that blind spot. At every position it still asserts the
+    engine's full legal-move set equals pydraughts' set, but it advances by
+    picking the next move from *pydraughts'* legal moves and replaying that
+    PDN string on the engine. The two stay synchronised because the move set
+    is asserted equal first — but the path through the tree is now chosen by
+    the oracle, so an engine-omitted branch can be entered and caught.
+
+    Deterministically seeded; at least 300 positions are compared.
+    """
+
+    def engine_move_for_pdn(board: CheckersBoard, pdn: str) -> CheckersMove:
+        """The engine move whose PDN string is ``pdn`` (they are equal sets)."""
+        for move in board.legal_moves():
+            if move.pdn() == pdn:
+                return move
+        raise AssertionError(
+            f"oracle move {pdn!r} absent from engine legal set "
+            f"{sorted(pdn_set(board))} at {board.to_fen()}"
+        )
+
+    rng = random.Random(20260521)
+    positions_checked = 0
+    walks = 0
+    while positions_checked < 300:
+        walks += 1
+        board = CheckersBoard.initial()
+        for _ in range(200):
+            fen = board.to_fen()
+            engine_moves = pdn_set(board)
+            oracle_moves = oracle_pdn_set(fen)
+            assert engine_moves == oracle_moves, (
+                f"move-set mismatch at {fen}: "
+                f"engine-only={engine_moves - oracle_moves}, "
+                f"oracle-only={oracle_moves - engine_moves}"
+            )
+            positions_checked += 1
+            if not oracle_moves:
+                break
+            # Advance along an ORACLE-chosen move, replayed on the engine.
+            chosen_pdn = rng.choice(sorted(oracle_moves))
+            board = board.apply(engine_move_for_pdn(board, chosen_pdn))
+            if board.is_draw():
+                break
+    assert positions_checked >= 300, positions_checked
+
+
+# ---------------------------------------------------------------------------
+# Invalid PDN-FEN tests (directive 11)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad_fen",
+    [
+        "B:W1,,2:B",  # doubled comma — empty middle token
+        "B:W,1,2:B",  # leading comma — empty first token
+        "B:W1,2,:B",  # trailing comma — empty last token
+        "B:W:B1,,2",  # doubled comma in the Red field
+        "B:W:B5,",  # trailing comma in the Red field
+        "B:W,:B",  # a lone comma is a single empty token
+    ],
+)
+def test_from_fen_rejects_empty_square_tokens(bad_fen: str) -> None:
+    """``from_fen`` rejects empty list elements from doubled/edge commas.
+
+    Previously these were silently dropped, so ``B:W1,,2:B`` parsed as
+    ``B:W1,2:B`` (directive 11 / analyst MINOR). Malformed FEN must raise.
+    """
+    with pytest.raises(ValueError):
+        CheckersBoard.from_fen(bad_fen)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad_fen",
+    [
+        "B:W1:B:extra",  # four colon-separated fields, not three
+        "B:W1",  # only two fields
+        "X:W1:B2",  # bad turn token
+        "B:X1:B2",  # wrong colour tag on the first field
+        "B:W1:X2",  # wrong colour tag on the second field
+        "B:W33:B1",  # square out of range (> 32)
+        "B:W0:B1",  # square out of range (< 1)
+        "B:W1:B1",  # the same square claimed by both colours
+        "B:W1,1:B2",  # the same square listed twice
+        "B:Wx:B1",  # non-numeric square token
+        "B:WK:B1",  # bare king prefix with no number
+    ],
+)
+def test_from_fen_rejects_malformed_fen(bad_fen: str) -> None:
+    """``from_fen`` rejects structurally malformed PDN-FEN of every shape."""
+    with pytest.raises(ValueError):
+        CheckersBoard.from_fen(bad_fen)
