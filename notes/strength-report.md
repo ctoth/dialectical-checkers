@@ -29,8 +29,10 @@ show the strength curve.
 
 - **Games per matchup:** 48.
 - **Seed:** 0. The whole evaluation is a deterministic function of this seed —
-  re-running with seed 0 yields byte-identical results (verified,
-  `scripts/phase7_verify_reproducible.py`).
+  re-running with seed 0 yields byte-identical results. This is verified by
+  `scripts/phase7_verify_reproducible.py`, which runs the full reported
+  evaluation (48 games per matchup, MinimaxPlayer depths 1/2/4, loss mining
+  included) twice and confirms the two formatted reports are byte-identical.
 - **Colour split:** the engine plays Red in 24 games and White in 24 games of
   every matchup — an exact, equal split.
 - **Opening diversification:** `EnginePlayer` and `MinimaxPlayer` are *fully
@@ -116,10 +118,11 @@ was itself a mandatory capture with no safe alternative. Examples:
   material.
 - vs Minimax(2), game 15, ply 17: `14-17` loses 200 material; game 24, ply 23:
   `2x9` loses 100; game 46, ply 20: `24-20` loses 100.
-- vs Minimax(4): four of the eight losses are flagged at ply 12 with the
-  identical forced capture `22x15` losing 250 material; game 12 is flagged at
-  ply 1 — the engine's very first move from a normal 12-vs-12 opening was a
-  forced capture that began a lost line.
+- vs Minimax(4): four of the eight losses are flagged at ply 12 — three of
+  them (games 30, 32, 40) with the identical forced capture `22x15` losing 250
+  material, and the fourth (game 27) with the forced capture `18x11` losing 100
+  material; game 12 is flagged at ply 1 — the engine's very first move from a
+  normal 12-vs-12 opening was a forced capture that began a lost line.
 
 **Honest interpretation.** The loss-mining diagnostic catches the moment a loss
 becomes a *proven hard fact* (a forced capture sequence the resolver can see
@@ -149,8 +152,8 @@ Phase 7 added only evaluation tooling:
 No verified Phase 0-6 module (`board.py`, `captures.py`, `engine.py`,
 `witnesses.py`, `arguments.py`, `scheme.py`, `selection.py`, `search.py`,
 `pdn.py`, `match.py`) was modified. The engine's move selection is unchanged.
-All 657 prior tests still pass alongside the 21 new ones (see the report at
-`reports/phase7-strength-eval-coder.md` for the verbatim gate output).
+All 657 prior tests still pass alongside the 21 new ones — the Phase 7 gate
+measured 678 passing tests and `pyright` reporting 0 errors.
 
 ---
 
