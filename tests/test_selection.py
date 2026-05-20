@@ -23,8 +23,15 @@ from __future__ import annotations
 
 import pytest
 
-from dialectical_checkers.arguments import MoveProbe, build_root_argument_graph
+from dialectical_checkers.arguments import (
+    MoveProbe,
+    RootArgumentGraph,
+    build_root_argument_graph,
+)
 from dialectical_checkers.selection import (
+    SELECTOR_MODES,
+    _accepted_heuristic_pro_count,
+    _categoriser_score,
     _fact_pro_priority,
     _selection_key,
     _worst_fact_objection_magnitude,
@@ -238,3 +245,226 @@ def test_net_material_demotes_large_capture_with_big_giveback() -> None:
     assert _fact_pro_priority(big_giveback) == (0, 0, 0, 50)
     assert _fact_pro_priority(clean_small) == (0, 0, 0, 100)
     assert choose_move([big_giveback, clean_small], graph).pdn == "4-8"
+
+
+# ---------------------------------------------------------------------------
+# term 3 — graded Categoriser score (design §7, Phase 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_term3_categoriser_score_clean_move_is_one() -> None:
+    """A surviving move with no HEURISTIC objection has Categoriser score 1.0."""
+    probe = MoveProbe(pdn="11-15", reasons=("pro:opposition",))
+    graph = build_root_argument_graph([probe])
+    assert _categoriser_score(probe, graph) == 1.0
+
+
+@pytest.mark.unit
+def test_term3_categoriser_score_drops_under_heuristic_objection() -> None:
+    """A HEURISTIC objection drops the move's term-3 Categoriser score below 1.
+
+    Two clean-FACT survivors (both term 1 = 0, no FACT pro): one carries a
+    HEURISTIC objection, one does not. The graded term 3 ranks the clean move
+    first — and ``choose_move`` in the default ``argument`` mode picks it. The
+    pre-Phase-5 selector (FACT terms only) would have tied them and fallen to
+    the PDN tiebreak, picking ``10-15`` only by string order — this test pins
+    that the graded layer, not the tiebreak, makes the choice.
+    """
+    objected = MoveProbe(
+        pdn="10-15",
+        reasons=("pro:opposition",),
+        objections=("obj:loses_opposition",),
+    )
+    clean = MoveProbe(pdn="11-16", reasons=("pro:opposition",))
+    graph = build_root_argument_graph([objected, clean])
+    assert _categoriser_score(objected, graph) == pytest.approx(0.5)
+    assert _categoriser_score(clean, graph) == 1.0
+    # Graded term 3 ranks the clean move first under the full key.
+    assert _selection_key(clean, graph, None) < _selection_key(
+        objected, graph, None
+    )
+    assert choose_move([objected, clean], graph).pdn == "11-16"
+
+
+@pytest.mark.unit
+def test_term3_comes_after_fact_terms() -> None:
+    """A FACT pro always outranks a better Categoriser score (term 2 > term 3).
+
+    ``fact_move`` carries a FACT ``pro:material:100`` but also a HEURISTIC
+    objection (Cat 0.5); ``graded_move`` is clean (Cat 1.0) but has no FACT
+    pro. The FACT pro-value term (2) dominates the graded Categoriser term (3),
+    so the selector picks the FACT move despite its lower Categoriser score —
+    a FACT decision is never overridden by a graded one (design §7).
+    """
+    fact_move = MoveProbe(
+        pdn="2-6",
+        reasons=("pro:material:100",),
+        objections=("obj:loses_opposition",),
+    )
+    graded_move = MoveProbe(pdn="3-7", reasons=("pro:opposition",))
+    graph = build_root_argument_graph([fact_move, graded_move])
+    assert _categoriser_score(fact_move, graph) == pytest.approx(0.5)
+    assert _categoriser_score(graded_move, graph) == 1.0
+    # The FACT pro term decides: ``2-6`` wins despite the worse Cat score.
+    assert choose_move([fact_move, graded_move], graph).pdn == "2-6"
+
+
+# ---------------------------------------------------------------------------
+# term 4 — value-weighted accepted-heuristic-pro count (design §7, Phase 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_term4_counts_heuristic_pros_not_fact_pros() -> None:
+    """Term 4 counts HEURISTIC pro-reasons only — FACT pros never contribute.
+
+    A probe carrying two HEURISTIC pros and one FACT pro has an
+    accepted-heuristic-pro count of 2 — the FACT ``pro:material`` is term 2's
+    business, not term 4's.
+    """
+    probe = MoveProbe(
+        pdn="11-15",
+        reasons=("pro:opposition", "pro:back_rank_hold", "pro:material:100"),
+    )
+    assert _accepted_heuristic_pro_count(probe) == 2
+
+
+@pytest.mark.unit
+def test_term4_breaks_a_categoriser_tie() -> None:
+    """Term 4 ranks more accepted heuristic pros first when term 3 ties.
+
+    Two clean survivors, neither with a HEURISTIC objection — so both have
+    Categoriser score 1.0 and term 3 ties. ``rich`` carries two HEURISTIC
+    pro-reasons, ``thin`` carries one; term 4 ranks ``rich`` first.
+    """
+    rich = MoveProbe(
+        pdn="11-16", reasons=("pro:opposition", "pro:back_rank_hold")
+    )
+    thin = MoveProbe(pdn="10-15", reasons=("pro:opposition",))
+    graph = build_root_argument_graph([rich, thin])
+    assert _categoriser_score(rich, graph) == _categoriser_score(thin, graph)
+    assert _accepted_heuristic_pro_count(rich) == 2
+    assert _accepted_heuristic_pro_count(thin) == 1
+    assert _selection_key(rich, graph, None) < _selection_key(
+        thin, graph, None
+    )
+    assert choose_move([rich, thin], graph).pdn == "11-16"
+
+
+# ---------------------------------------------------------------------------
+# differential — selector-mode consistency and determinism (design §7)
+# ---------------------------------------------------------------------------
+
+
+def _mode_probes() -> tuple[list[MoveProbe], RootArgumentGraph]:
+    """A hand-built probe set + its graph exercising every selector key term.
+
+    Five surviving moves spanning FACT pros, HEURISTIC objections and
+    HEURISTIC pros, so the different selector modes can genuinely diverge.
+    """
+    probes = [
+        MoveProbe(pdn="1-5", reasons=("pro:terminal_win",)),
+        MoveProbe(pdn="2-6", reasons=("pro:material:100",)),
+        MoveProbe(
+            pdn="3-7",
+            reasons=("pro:opposition", "pro:back_rank_hold"),
+        ),
+        MoveProbe(
+            pdn="4-8",
+            reasons=("pro:opposition",),
+            objections=("obj:loses_opposition",),
+        ),
+        MoveProbe(pdn="9-13", reasons=("pro:opposition",)),
+    ]
+    return probes, build_root_argument_graph(probes)
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize("mode", sorted(SELECTOR_MODES))
+def test_every_selector_mode_is_deterministic(mode: str) -> None:
+    """Each ``selector_mode`` returns the same move on repeated calls.
+
+    Every mode's key ends in ``probe.pdn`` (a total, deterministic tiebreak),
+    so repeated ``choose_move`` calls in any mode must agree.
+    """
+    probes, graph = _mode_probes()
+    first = choose_move(probes, graph, selector_mode=mode).pdn
+    for _ in range(5):
+        assert choose_move(probes, graph, selector_mode=mode).pdn == first
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize("mode", sorted(SELECTOR_MODES))
+def test_every_selector_mode_picks_a_crisp_survivor(mode: str) -> None:
+    """Each ``selector_mode`` returns one of the crisp survivors.
+
+    Every mode restricts its candidate set to ``graph.survivors`` — no mode can
+    ever resurrect a crisply-eliminated move (design §7). Here a move carrying
+    an undefeated FACT objection is crisply eliminated; no mode may pick it.
+    """
+    survivor = MoveProbe(pdn="11-15", reasons=("pro:opposition",))
+    eliminated = MoveProbe(pdn="9-14", objections=("obj:allows_shot:200",))
+    probes = [survivor, eliminated]
+    graph = build_root_argument_graph(probes)
+    assert graph.survivors == frozenset({"11-15"})
+    chosen = choose_move(probes, graph, selector_mode=mode).pdn
+    assert chosen in graph.survivors, (mode, chosen)
+    assert chosen != "9-14", mode
+
+
+@pytest.mark.differential
+def test_argument_is_the_default_selector_mode() -> None:
+    """``choose_move`` with no ``selector_mode`` is the ``argument`` mode."""
+    probes, graph = _mode_probes()
+    assert (
+        choose_move(probes, graph).pdn
+        == choose_move(probes, graph, selector_mode="argument").pdn
+    )
+
+
+@pytest.mark.differential
+def test_optimizer_mode_aliases_argument_mode() -> None:
+    """``optimizer`` mode is the full §7 key — identical to ``argument``.
+
+    checkers has no separate optimisation module (design §1 names none), so
+    ``optimizer`` is a documented deterministic alias of the full lexicographic
+    key, kept for surface parity with dialectical-chess.
+    """
+    probes, graph = _mode_probes()
+    assert (
+        choose_move(probes, graph, selector_mode="optimizer").pdn
+        == choose_move(probes, graph, selector_mode="argument").pdn
+    )
+
+
+@pytest.mark.differential
+def test_selector_modes_can_diverge() -> None:
+    """The selector modes are genuinely distinct — they do not all agree.
+
+    If every mode returned the same move the multi-mode surface would be
+    vacuous. Over the hand-built spread of probes, ``score`` (static eval) and
+    ``categoriser`` (graded layer) reach a different move from ``argument``
+    (full key) on at least one position — confirming the modes are real.
+    """
+    probes, graph = _mode_probes()
+    by_mode = {
+        mode: choose_move(probes, graph, selector_mode=mode).pdn
+        for mode in sorted(SELECTOR_MODES)
+    }
+    # ``argument`` leads with the FACT terms -> the terminal-win move 1-5.
+    assert by_mode["argument"] == "1-5"
+    # ``categoriser`` ignores FACT terms; it ranks by the graded layer, where
+    # 4-8 (the only move with a heuristic objection) is NOT chosen and a clean
+    # move with more heuristic pros leads.
+    assert by_mode["categoriser"] != "4-8"
+    # Not every mode agrees — the surface is non-vacuous.
+    assert len(set(by_mode.values())) >= 2, by_mode
+
+
+@pytest.mark.unit
+def test_unknown_selector_mode_rejected() -> None:
+    """``choose_move`` raises on an unknown ``selector_mode``."""
+    probes, graph = _mode_probes()
+    with pytest.raises(ValueError, match="unknown selector_mode"):
+        choose_move(probes, graph, selector_mode="nonsense")

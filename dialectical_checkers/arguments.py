@@ -1,10 +1,32 @@
-"""Crisp Dung layer over FACT-tier defeaters (design §6).
+"""Crisp Dung layer + graded Categoriser layer (design §6-7).
 
-Phase 3b builds the **crisp** layer only — the plain Dung
-``ArgumentationFramework`` of design ``notes/checkers-design.md`` §6, evaluated
-with ``formal-argumentation``'s ``grounded_extension``. The graded Categoriser
-layer over the survivors (design §7) is Phase 4 and is *not* built here; the
-``ranking`` field of :class:`RootArgumentGraph` is left empty as a clean seam.
+This module builds **two** layers, exactly as design ``notes/checkers-design.md``
+§6-7 specifies:
+
+* the **crisp** layer — the plain Dung ``ArgumentationFramework`` of design §6,
+  evaluated with ``formal-argumentation``'s ``grounded_extension``. It admits
+  **only FACT-tier** witnesses; a ``move:`` argument is grounded iff no
+  undefeated FACT objection / reply attacks it ("not provably refuted"). The
+  surviving move set is its grounded ``move:`` arguments (or — the
+  empty-survivor fallback — all moves). The crisp layer is **unchanged** from
+  Phase 3b: the graded layer below is purely additive.
+
+* the **graded Categoriser** layer (design §7) — Phase 5. Over the crisp
+  survivors *only*, a **second** plain Dung ``ArgumentationFramework`` whose
+  arguments are the surviving ``move:`` arguments plus the **HEURISTIC** ``obj:``
+  arguments on those survivors, with a defeat edge from each heuristic objection
+  to its move. ``categoriser_scores`` (from ``formal-argumentation``,
+  ``Besnard_2001`` / ``Bonzon_2016``) is run on it: ``Cat(move:A) = 1/(1 + Σ
+  Cat(attackers))`` is high when a move has few / weak heuristic objections. The
+  per-move Categoriser score is exposed on :attr:`RootArgumentGraph.ranking`.
+
+  The graded layer **only ranks** — it can never resurrect a crisply-eliminated
+  move (its node set is a subset of the crisp survivors) and never overrides a
+  FACT decision (the selector's graded key terms come strictly after the FACT
+  terms — see ``selection.py``). HEURISTIC **pro**-reasons cannot enter a Dung
+  AF (it has only attacks); design §7 v1 makes them a selector-key term, not a
+  graded-AF node, and this module does **not** build a QBAF (the deferred
+  v1.5).
 
 The crisp argument families (design §6), one Dung argument per row:
 
@@ -50,6 +72,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from argumentation.dung import ArgumentationFramework, grounded_extension
+from argumentation.ranking import categoriser_scores
 
 from dialectical_checkers.evidence import to_argument_evidence
 from dialectical_checkers.scheme import Tier
@@ -78,17 +101,31 @@ class MoveProbe:
 
 @dataclass(frozen=True)
 class RootArgumentGraph:
-    """The crisp Dung argument graph output (design §6).
+    """The crisp + graded argument graph output (design §6-7).
 
-    ``arguments`` / ``defeats`` are the crisp Dung AF of FACT-tier defeaters
+    ``arguments`` / ``defeats`` are the **crisp** Dung AF of FACT-tier defeaters
     (design §6); ``grounded_extension`` is its grounded extension;
     ``move_arguments`` maps each move's PDN to its ``move:`` argument id;
     ``survivors`` is the set of *move PDNs* that survive the crisp layer (the
     grounded ``move:`` arguments, or — under the empty-survivor fallback — all
     move PDNs).
 
-    ``ranking`` is the seam for the Phase-4 graded Categoriser layer (design
-    §7); Phase 3b leaves it empty.
+    ``ranking`` carries the **graded Categoriser** layer (design §7), built by
+    :func:`build_graded_layer` over the crisp survivors. Its keys:
+
+    * ``"scores"`` — ``dict[str, float]``: the ``categoriser_scores`` Categoriser
+      score of *every* node of the graded AF (the surviving ``move:`` arguments
+      and their HEURISTIC ``obj:`` arguments).
+    * ``"move_scores"`` — ``dict[str, float]``: the per-move Categoriser score,
+      keyed by **move PDN** — the selector's term-3 lookup. A move PDN absent
+      from the graded AF (a crisply-eliminated move) is absent here.
+    * ``"arguments"`` / ``"defeats"`` — the graded AF's node and edge sets, for
+      inspection / tests.
+    * ``"converged"`` / ``"iterations"`` — the ``categoriser_scores`` fixpoint
+      diagnostics.
+
+    ``ranking`` is ``{}`` only for an empty graph (a terminal position, no
+    probes); for any non-empty graph it carries the graded layer.
     """
 
     arguments: frozenset[str] = frozenset()
@@ -141,8 +178,96 @@ def _is_fact(label: str) -> bool:
         return False
 
 
+def _is_heuristic(label: str) -> bool:
+    """True iff ``label`` is a HEURISTIC-tier witness (design §7 graded layer).
+
+    The exact dual of :func:`_is_fact`: parsed once through
+    ``evidence.to_argument_evidence``. A label the parser rejects is not a known
+    HEURISTIC witness and is excluded — the graded layer never silently admits
+    an untyped label, exactly as the crisp layer never admits one.
+    """
+    try:
+        return to_argument_evidence(label).tier is Tier.HEURISTIC
+    except ValueError:
+        return False
+
+
+def build_graded_layer(
+    probes: list[MoveProbe], survivors: frozenset[str]
+) -> dict[str, Any]:
+    """Build the graded Categoriser layer over the crisp survivors (design §7).
+
+    A **second** plain Dung ``ArgumentationFramework``, built over the crisp
+    survivors *only*:
+
+    * its arguments are the surviving ``move:`` arguments — one per move PDN in
+      ``survivors`` — plus the **HEURISTIC** ``obj:`` arguments on those
+      survivors (a heuristic objection on a *crisply-eliminated* move never
+      enters, since that move's ``move:`` argument is not a node);
+    * its defeat edges run heuristic ``obj: -> move:`` — one per HEURISTIC
+      objection on a surviving move.
+
+    ``categoriser_scores`` (``formal-argumentation``, ``Besnard_2001`` /
+    ``Bonzon_2016`` Def. 9) is run on it: ``Cat(move:A) = 1/(1 + Σ
+    Cat(attackers))``, so a move with few / weak heuristic objections scores
+    high. The returned dict is :attr:`RootArgumentGraph.ranking` — see that
+    class's docstring for the key contract.
+
+    Only **HEURISTIC** objections enter — FACT objections live in the crisp
+    layer (design §6) and are *not* re-litigated here. Heuristic **reply**
+    attacks are not added: design §7 v1 builds the graded AF from "the
+    HEURISTIC ``obj:`` nodes" only, and ``witnesses.py`` types every reply it
+    emits FACT (a reply is emitted only from a proven resolver line), so there
+    is no heuristic reply to add. Heuristic **pro**-reasons cannot enter a Dung
+    AF at all (it has only attacks) — design §7 makes them a selector-key term,
+    not a graded-AF node; this function builds **no QBAF** (deferred v1.5).
+
+    The graded AF can never resurrect a crisply-eliminated move: its ``move:``
+    node set is exactly ``survivors``. An empty ``survivors`` (no probes) yields
+    an empty graded layer.
+    """
+    survivor_probes = [p for p in probes if p.pdn in survivors]
+
+    graded_arguments: set[str] = set()
+    graded_defeats: set[tuple[str, str]] = set()
+    for probe in survivor_probes:
+        move_id = _move_arg(probe.pdn)
+        graded_arguments.add(move_id)
+        # Only HEURISTIC objections enter the graded AF; FACT objections are
+        # the crisp layer's business and are not re-litigated here.
+        for label in probe.objections:
+            if not _is_heuristic(label):
+                continue
+            obj_id = obj_arg_id(probe.pdn, label)
+            graded_arguments.add(obj_id)
+            graded_defeats.add((obj_id, move_id))
+
+    framework = ArgumentationFramework(
+        arguments=frozenset(graded_arguments),
+        defeats=frozenset(graded_defeats),
+    )
+    result = categoriser_scores(framework)
+
+    # The per-move Categoriser score, keyed by move PDN — the selector's term-3
+    # lookup (design §7). A crisply-eliminated move has no node in the graded
+    # AF, so it is simply absent here.
+    move_scores = {
+        probe.pdn: result.scores[_move_arg(probe.pdn)]
+        for probe in survivor_probes
+    }
+
+    return {
+        "scores": dict(result.scores),
+        "move_scores": move_scores,
+        "arguments": frozenset(graded_arguments),
+        "defeats": frozenset(graded_defeats),
+        "converged": result.converged,
+        "iterations": result.iterations,
+    }
+
+
 def build_root_argument_graph(probes: list[MoveProbe]) -> RootArgumentGraph:
-    """Build the crisp Dung argument graph from move probes (design §6).
+    """Build the crisp Dung argument graph + graded Categoriser layer.
 
     For each probe (one per legal move):
 
@@ -162,10 +287,18 @@ def build_root_argument_graph(probes: list[MoveProbe]) -> RootArgumentGraph:
       probe never raised.
 
     No ``doubt`` argument, no duplicated arguments — every id is distinct.
-    HEURISTIC witnesses are filtered out. The grounded extension is computed
-    with ``formal-argumentation``; the surviving move set is the moves whose
-    ``move:`` argument is grounded, or — when none is (the empty-survivor
-    fallback, design §6) — *all* moves.
+    HEURISTIC witnesses are filtered out of the **crisp** layer. The grounded
+    extension is computed with ``formal-argumentation``; the surviving move set
+    is the moves whose ``move:`` argument is grounded, or — when none is (the
+    empty-survivor fallback, design §6) — *all* moves.
+
+    The **graded Categoriser** layer (design §7) is then built by
+    :func:`build_graded_layer` over those crisp survivors and stored on
+    :attr:`RootArgumentGraph.ranking`. The graded layer is purely additive: the
+    crisp ``arguments`` / ``defeats`` / ``grounded_extension`` / ``survivors``
+    are exactly Phase 3b's, and the graded layer's ``move:`` node set is a
+    *subset* of ``survivors`` — it can never resurrect a crisply-eliminated
+    move.
     """
     arguments: set[str] = set()
     defeats: set[tuple[str, str]] = set()
@@ -228,11 +361,17 @@ def build_root_argument_graph(probes: list[MoveProbe]) -> RootArgumentGraph:
     else:
         survivors = frozenset(move_arguments)
 
+    # The graded Categoriser layer (design §7) — built over the crisp survivors
+    # only, so it can never resurrect a crisply-eliminated move. For an empty
+    # graph (no probes / terminal position) ``survivors`` is empty and the
+    # graded layer is the trivial empty AF's result.
+    ranking = build_graded_layer(probes, survivors)
+
     return RootArgumentGraph(
         arguments=frozenset(arguments),
         defeats=frozenset(defeats),
         move_arguments=move_arguments,
         grounded_extension=grounded,
         survivors=survivors,
-        ranking={},
+        ranking=ranking,
     )

@@ -295,10 +295,20 @@ def test_empty_probes_yields_empty_graph() -> None:
 
 
 @pytest.mark.unit
-def test_ranking_seam_left_empty_for_phase4() -> None:
-    """Phase 3b leaves the graded-layer ``ranking`` seam empty (design §7)."""
+def test_ranking_carries_the_graded_categoriser_layer() -> None:
+    """Phase 5 fills the ``ranking`` field with the graded Categoriser layer.
+
+    Phase 3b left ``ranking`` empty as a seam; Phase 5 (design §7) builds the
+    graded layer into it. For a single clean probe — a move with no HEURISTIC
+    objection — the graded AF has the one ``move:`` node, no defeats, and the
+    move's Categoriser score is the unattacked-argument default of ``1.0``.
+    """
     graph = build_root_argument_graph([MoveProbe(pdn="11-15")])
-    assert graph.ranking == {}
+    assert graph.ranking != {}
+    assert graph.ranking["move_scores"] == {"11-15": 1.0}
+    assert graph.ranking["arguments"] == frozenset({"move:11-15"})
+    assert graph.ranking["defeats"] == frozenset()
+    assert graph.ranking["converged"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -386,3 +396,132 @@ def test_graph_defeats_are_over_declared_arguments() -> None:
     for attacker, target in graph.defeats:
         assert attacker in graph.arguments
         assert target in graph.arguments
+
+
+# ---------------------------------------------------------------------------
+# unit — the graded Categoriser layer (design §7, Phase 5)
+# ---------------------------------------------------------------------------
+#
+# ``build_graded_layer`` builds a SECOND plain Dung AF over the crisp survivors
+# — nodes = surviving ``move:`` + their HEURISTIC ``obj:`` nodes, edges
+# heuristic ``obj -> move`` — and runs ``categoriser_scores`` on it. These
+# tests drive it directly over hand-built probes so the graded semantics are
+# tested in isolation.
+
+
+@pytest.mark.unit
+def test_graded_layer_clean_move_scores_one() -> None:
+    """A surviving move with no HEURISTIC objection scores the Cat default 1.0.
+
+    An unattacked argument's Categoriser score is 1.0 (Bonzon 2016 Def. 9). A
+    clean move's ``move:`` node has no attacker in the graded AF, so its
+    per-move Categoriser score is 1.0.
+    """
+    graph = build_root_argument_graph(
+        [MoveProbe(pdn="11-15", reasons=("pro:opposition",))]
+    )
+    assert graph.ranking["move_scores"]["11-15"] == 1.0
+
+
+@pytest.mark.unit
+def test_graded_layer_heuristic_objection_lowers_score() -> None:
+    """A HEURISTIC objection adds a graded-AF defeat and lowers the Cat score.
+
+    A move carrying one HEURISTIC objection has an ``obj:`` node defeating its
+    ``move:`` node in the graded AF; ``Cat(move) = 1/(1 + Cat(obj)) = 1/2``. A
+    clean sibling stays at 1.0 — so the graded layer ranks the clean move above
+    the objected one.
+    """
+    objected = MoveProbe(
+        pdn="9-14",
+        reasons=("pro:opposition",),
+        objections=("obj:loses_opposition",),
+    )
+    clean = MoveProbe(pdn="10-15", reasons=("pro:opposition",))
+    graph = build_root_argument_graph([objected, clean])
+    assert graph.ranking["move_scores"]["9-14"] == pytest.approx(0.5)
+    assert graph.ranking["move_scores"]["10-15"] == 1.0
+    # The graded AF carries exactly the one heuristic obj -> move defeat.
+    assert graph.ranking["defeats"] == frozenset(
+        {("obj:9-14:obj:loses_opposition", "move:9-14")}
+    )
+
+
+@pytest.mark.unit
+def test_graded_layer_more_objections_lower_score_monotonically() -> None:
+    """More independent HEURISTIC objections lower the Cat score (Cardinality).
+
+    ``Bonzon_2016`` proves the Categoriser satisfies Cardinality Precedence: N
+    independent objections lower the score monotonically, with no copy-counting
+    (design §7). Two heuristic objections score the move below one, one below
+    none.
+    """
+    none = MoveProbe(pdn="10-15", reasons=("pro:opposition",))
+    one = MoveProbe(
+        pdn="9-14",
+        reasons=("pro:opposition",),
+        objections=("obj:loses_opposition",),
+    )
+    two = MoveProbe(
+        pdn="11-16",
+        reasons=("pro:opposition",),
+        objections=("obj:loses_opposition", "obj:single_corner_drift"),
+    )
+    graph = build_root_argument_graph([none, one, two])
+    scores = graph.ranking["move_scores"]
+    assert scores["10-15"] > scores["9-14"] > scores["11-16"]
+
+
+@pytest.mark.unit
+def test_graded_layer_excludes_fact_objections() -> None:
+    """Only HEURISTIC objections enter the graded AF — FACT ones do not.
+
+    A FACT objection lives in the crisp layer (design §6); the graded layer
+    (design §7) is built only from the HEURISTIC ``obj:`` nodes. A move
+    carrying a FACT objection but no HEURISTIC one therefore has no graded-AF
+    defeat — but note a move with an undefeated FACT objection is also
+    crisply eliminated, so the case is tested in the empty-survivor fallback
+    below. Here the move's FACT objection is defeated by a keyed FACT defense
+    so the move survives, and the graded AF still carries no defeat for it.
+    """
+    probe = MoveProbe(
+        pdn="2x11",
+        reasons=("pro:material:100",),
+        reply_attacks=("reply:material:100",),
+        defenses=("defense:holds_exchange@reply:material:100",),
+    )
+    graph = build_root_argument_graph([probe])
+    # The move survived the crisp layer.
+    assert "2x11" in graph.survivors
+    # ...and the graded AF carries no defeat — the FACT reply did not enter it.
+    assert graph.ranking["defeats"] == frozenset()
+    assert graph.ranking["move_scores"]["2x11"] == 1.0
+
+
+@pytest.mark.unit
+def test_graded_layer_only_ranks_crisp_survivors() -> None:
+    """The graded AF's ``move:`` nodes are exactly the crisp survivors.
+
+    A move crisply eliminated by an undefeated FACT objection is NOT a node in
+    the graded AF — the graded layer can never resurrect it (design §7). Here
+    one move is clean (survives) and one carries an undefeated FACT objection
+    (eliminated): only the survivor appears in the graded layer.
+    """
+    survivor = MoveProbe(pdn="11-15", reasons=("pro:material:100",))
+    eliminated = MoveProbe(
+        pdn="9-14", objections=("obj:allows_shot:200",)
+    )
+    graph = build_root_argument_graph([survivor, eliminated])
+    # The crisp layer eliminated 9-14 and kept 11-15.
+    assert graph.survivors == frozenset({"11-15"})
+    # The graded AF has only the survivor's move: node — 9-14 is absent.
+    assert graph.ranking["arguments"] == frozenset({"move:11-15"})
+    assert set(graph.ranking["move_scores"]) == {"11-15"}
+
+
+@pytest.mark.unit
+def test_graded_layer_empty_for_terminal_position() -> None:
+    """An empty probe list yields an empty graded layer (no nodes, no scores)."""
+    graph = build_root_argument_graph([])
+    assert graph.ranking["arguments"] == frozenset()
+    assert graph.ranking["move_scores"] == {}
