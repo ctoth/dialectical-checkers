@@ -1,0 +1,71 @@
+[project]
+name = "dialectical-checkers"
+version = "0.1.0"
+description = "A dialectical English-draughts engine experiment built around argument-graph move selection"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "ctoth" },
+]
+keywords = [
+    "checkers",
+    "draughts",
+    "argumentation",
+    "formal-argumentation",
+    "dialectical-reasoning",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Games/Entertainment :: Board Games",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "formal-argumentation @ git+https://github.com/ctoth/argumentation.git@d47c87003afdce450bfeff10f242309c510f1690",
+]
+
+[project.urls]
+Homepage = "https://github.com/ctoth/dialectical-checkers"
+Repository = "https://github.com/ctoth/dialectical-checkers"
+Issues = "https://github.com/ctoth/dialectical-checkers/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["dialectical_checkers"]
+
+[tool.pyright]
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+include = ["dialectical_checkers", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: focused unit-level contract tests",
+    "property: property-based or metamorphic tests",
+    "differential: differential or oracle-comparison tests",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.0",
+    "pyright>=1.1.390",
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+]

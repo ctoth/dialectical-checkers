@@ -1,0 +1,15 @@
+.venv/
+.pytest_cache/
+.pyright/
+__pycache__/
+*.py[cod]
+scratch/
+logs/
+reports/
+dist/
+build/
+*.egg-info/
+
+# Paper corpus — binary artifacts stay local-only, text notes are committed
+*.pdf
+*.png
