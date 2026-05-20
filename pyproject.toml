@@ -40,6 +40,7 @@ Issues = "https://github.com/ctoth/dialectical-checkers/issues"
 
 [project.scripts]
 dchk-match = "dialectical_checkers.cli.match_cli:main"
+dchk-eval = "dialectical_checkers.cli.eval_cli:main"
 
 [build-system]
 requires = ["hatchling"]
