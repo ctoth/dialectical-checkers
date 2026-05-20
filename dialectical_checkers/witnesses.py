@@ -31,16 +31,19 @@ is to move on ``S``).
   pairing each of his pieces with the opponent's and treating the board as
   empty, he has the last move).
 
-  The pairing-off method is unambiguous **only** for an equal-force ending
-  with exactly **one piece per side** — then there is a single pairing and the
-  result is the parity of the two pieces' separation. With more pieces per
-  side the pairing is genuinely ambiguous (Pask: "Countless rules have been
-  formulated ... all of them are confusing and unnecessary"), so the
-  opposition witnesses fire **only** in the one-piece-per-side equal-force
-  case and make no claim otherwise — a HEURISTIC witness firing exactly when
-  its precise definition holds, silent when it does not.
+  The pairing-off method is unambiguous **only** for an **equal-force** ending
+  with exactly **one piece per side** — and equal force here means the two
+  lone pieces are the **same type** (man-vs-man OR king-vs-king): a
+  man-vs-king ending is *not* equal force (Pask: "in any position where the
+  forces are equal"), so the witnesses make no claim there. In the
+  one-man-vs-one-man / one-king-vs-one-king case there is a single pairing and
+  the result is the parity of the two pieces' separation. With more pieces per
+  side, or with unequal force, the pairing is genuinely ambiguous (Pask:
+  "Countless rules have been formulated ... all of them are confusing and
+  unnecessary"), so the opposition witnesses fire **only** in the
+  one-piece-per-side equal-force same-type case and make no claim otherwise.
 
-  Precise rule (the turn-independent position property ``holder``):
+  Precise rule (the position property ``holder``):
 
       separation = Chebyshev (king-step) distance between the two pieces
                  = max(|row_a - row_b|, |col_a - col_b|)
@@ -48,27 +51,43 @@ is to move on ``S``).
                   = the side to move       if separation is ODD
 
   (An even separation with you to move forces you to give ground first, so the
-  *waiter* holds the opposition; an odd separation flips it. Verified
-  self-consistent: when a side holds the opposition every legal move passes it
-  to the opponent, and a side that does not hold it cannot seize it — the
-  alternating "the move" property.)
+  *waiter* holds the opposition; an odd separation flips it.)
 
   ``pro:opposition`` fires on ``M`` iff ``holder(S) == mover`` — the move
-  reaches a position whose opposition the mover holds. ``obj:loses_opposition``
-  fires iff ``holder(R) == mover`` but ``holder(S) != mover`` *and* some other
-  legal move keeps it — the mover held the opposition and ``M`` threw it away
-  when a keeping alternative existed.
+  reaches a 1v1 equal-force ending whose opposition the mover holds.
+  ``obj:loses_opposition`` is its exact **mirror** — it fires iff ``holder(S)``
+  is defined (``S`` is a 1v1 equal-force ending) and ``holder(S) != mover``:
+  the move lands the game in a 1v1 ending whose opposition the *opponent*
+  holds, leaving the mover the side in zugzwang. Both witnesses are S-based —
+  a deterministic judgement of the position the move reaches.
+
+  Why the mirror is S-based, not a "held it then threw it away" root-vs-child
+  rule: ``holder`` flips with both the separation parity *and* the side to
+  move, and a quiet move flips *both* — so ``holder`` is invariant under any
+  quiet move. The only moves that change it are a capture (which wins the 1v1
+  outright) or a crowning (which promotes a man); neither is a tempo "loss".
+  An exhaustive sweep of every 1v1 and 2v2 position confirmed no quiet move
+  surrenders a held opposition and no move secures one a sibling fails to —
+  so a root-vs-child ``obj:loses_opposition`` is a dead witness. The S-based
+  mirror is the sound, reachable form: it fires exactly on the moves
+  ``pro:opposition`` does not, among moves whose child is a 1v1 ending.
 
 * ``pro:back_rank_hold`` / ``obj:back_rank_break`` — STRUCTURE. The
   "king-row" / back-rank guard of design-§5 / Pask Lesson 18: keeping pieces
   on the mover's **home rank** (the rank the *opponent* must reach to crown —
   row 0 for Red, row 7 for White) denies the opponent crowning squares.
 
+  Only **men** are back-rank guards: an unmoved man holds a crowning square
+  against the opponent, whereas a king on the home rank is a mobile crowned
+  piece, not a guard. The back-rank count therefore counts mover **men** on
+  the home rank — kings there are ignored.
+
   ``pro:back_rank_hold`` fires iff, after ``M``, the mover has **>= 2** of its
-  own pieces on its home rank. ``obj:back_rank_break`` fires iff ``M`` moves a
-  mover piece **off** the home rank and that drops the mover's home-rank piece
+  own **men** on its home rank. ``obj:back_rank_break`` fires iff ``M`` moves a
+  mover **man off** the home rank and that drops the mover's home-rank man
   count from **>= 2 at the root to < 2 after the move** — a premature break of
-  a back-rank guard that was intact.
+  a back-rank guard that was intact. A king moving off the home rank is never
+  a back-rank break.
 
 * ``pro:center:{n}`` — STRUCTURE. Central-square occupation (Pask Lesson 16
   "Centre and Side Moves"). The four central squares are ``{14, 15, 18, 19}``
@@ -111,11 +130,14 @@ is to move on ``S``).
   single-corner square and whose origin is **not** — the man is drifting *into*
   the cramped single corner.
 
-* ``obj:exposes_man`` — MATERIAL, HEURISTIC. A mover piece becomes capturable
+* ``obj:exposes_man`` — MATERIAL, HEURISTIC. A mover **man** becomes capturable
   but the loss is **not proven**. Fires iff, after ``M``, the opponent has at
-  least one legal capture (so a mover piece is *en prise*) **and** the
-  forced-capture resolver did **not** prove a fact-tier shot for the opponent
-  (``opponent_shot`` returned ``None`` or a non-FACT result). Design §5: "if
+  least one legal capture **whose captured piece is a mover man** (so a mover
+  *man* — not a king — is *en prise*) **and** the forced-capture resolver did
+  **not** prove a fact-tier shot for the opponent (``opponent_shot`` returned
+  ``None`` or a non-FACT result). The captured piece must be a man: the label
+  and the design §5 row are "man capturable" — an exposed king is a
+  materially different fact and earns no witness here. Design §5: "if
   the resolver proves the man is lost it is ``allows_shot`` (FACT); if it only
   *looks* loose it is ``exposes_man`` (HEURISTIC)" — the tier is decided by
   what the resolver proved, never asserted. A move already carrying the FACT
@@ -291,6 +313,22 @@ def _pieces_of(board: CheckersBoard, side: str) -> list[tuple[int, bool]]:
     return out
 
 
+def _captures_a_man(board: CheckersBoard, move: CheckersMove) -> bool:
+    """True iff ``move`` (a jump on ``board``) captures at least one **man**.
+
+    Each square in ``move.captured`` holds the jumped piece on ``board`` (the
+    resolver removes captured pieces only at sequence end). The witness
+    ``obj:exposes_man`` fires only when a *man* is en prise — a captured king
+    is a materially different fact (design §5), so an opponent jump that takes
+    only kings does not count.
+    """
+    for cap in move.captured:
+        cell = board.cells[cap - 1]
+        if cell is not None and not cell[1]:
+            return True
+    return False
+
+
 def _opposition_holder(board: CheckersBoard) -> str | None:
     """The side holding the opposition on ``board``, or ``None`` (design §5).
 
@@ -312,9 +350,16 @@ def _opposition_holder(board: CheckersBoard) -> str | None:
         # The pairing-off method is ambiguous with more than one piece a side
         # (Pask) — and undefined with none; make no claim.
         return None
-    # Equal force (one piece each) is required; a man vs a king is still one
-    # piece each, and the parity argument is purely geometric, so the rule
-    # applies. The Chebyshev distance is the king-step separation.
+    # Equal force is required (Pask: "in any position where the forces are
+    # equal"). One piece each is necessary but NOT sufficient — the two single
+    # pieces must be the SAME type: man-vs-man OR king-vs-king. A man-vs-king
+    # ending is unequal force; the opposition concept does not apply, so the
+    # witness makes no claim. ``reds[0][1]`` / ``whites[0][1]`` is the
+    # ``is_king`` flag of each side's lone piece.
+    if reds[0][1] != whites[0][1]:
+        return None
+    # Equal force, one piece each — the single case the pairing-off method is
+    # unambiguous. The Chebyshev distance is the king-step separation.
     r_row, r_col = _coord(reds[0][0] - 1)
     w_row, w_col = _coord(whites[0][0] - 1)
     separation = max(abs(r_row - w_row), abs(r_col - w_col))
@@ -324,14 +369,19 @@ def _opposition_holder(board: CheckersBoard) -> str | None:
 
 
 def _home_rank_count(board: CheckersBoard, side: str) -> int:
-    """How many ``side`` pieces stand on ``side``'s home rank (design §5).
+    """How many ``side`` **men** stand on ``side``'s home rank (design §5).
 
     ``side``'s home rank is the rank the opponent crowns on (row 0 for Red,
-    row 7 for White) — pieces there guard the king-row.
+    row 7 for White). The back-rank guard of design §5 ("keeps king-row men" /
+    "premature king-row man move") is an **unmoved man** holding a crowning
+    square against the opponent — a king on the home rank is a mobile crowned
+    piece, not a guard. Only MEN are counted.
     """
     home_row = _HOME_RANK[side]
     count = 0
-    for pdn, _is_king in _pieces_of(board, side):
+    for pdn, is_king in _pieces_of(board, side):
+        if is_king:
+            continue
         if _coord(pdn - 1)[0] == home_row:
             count += 1
     return count
@@ -451,11 +501,13 @@ def _heuristic_objections(
     board: CheckersBoard,
     move: CheckersMove,
     child: CheckersBoard,
-    siblings: tuple[CheckersMove, ...],
     fact_objections: list[str],
     opponent_shot_result: ShotResult | None,
 ) -> list[str]:
     """The HEURISTIC CQ8_9 objections for ``move`` (design §5, Phase 4).
+
+    Every HEURISTIC objection here is S-based — a deterministic judgement of
+    the position ``move`` reaches — so no sibling list is needed.
 
     ``fact_objections`` is the move's already-computed FACT objection list —
     ``obj:exposes_man`` is suppressed when a FACT objection already covers the
@@ -469,25 +521,40 @@ def _heuristic_objections(
     mover = board.turn
     objections: list[str] = []
 
-    # --- obj:loses_opposition — the move throws away a held opposition ------
-    holder_root = _opposition_holder(board)
+    # --- obj:loses_opposition — the move lands in a lost-opposition ending --
+    # The exact dual of ``pro:opposition``. ``pro:opposition`` fires iff the
+    # move reaches a 1v1 equal-force ending whose opposition the mover holds
+    # (``holder(S) == mover``); ``obj:loses_opposition`` is its mirror — the
+    # move reaches a 1v1 equal-force ending whose opposition the **opponent**
+    # holds (``holder(S)`` is defined and ``!= mover``). The mover is then the
+    # side in zugzwang: the move has thrown the tempo battle.
+    #
+    # The witness is S-based, exactly as ``pro:opposition`` is — never a
+    # root-vs-child comparison. A root-vs-child "held it, then surrendered it"
+    # rule is *geometrically dead*: ``holder`` is turn-dependent, so a quiet
+    # move flips both the separation parity and the turn and therefore leaves
+    # ``holder`` invariant — the only moves that change it are a capture
+    # (which wins the 1v1 outright) or a crowning (which promotes a man). An
+    # exhaustive sweep over every 1v1/2v2 position confirmed no quiet move
+    # surrenders a held opposition and no move secures one a sibling fails to.
+    # So the only sound, reachable mirror is the S-based one: it fires exactly
+    # on the moves ``pro:opposition`` does not, among moves whose child is a
+    # 1v1 equal-force ending.
     holder_after = _opposition_holder(child)
-    if holder_root == mover and holder_after != mover:
-        # The mover held the opposition and this move surrendered it — only an
-        # objection if a sibling move would have kept it.
-        keeps_exist = False
-        for sibling in siblings:
-            if sibling == move:
-                continue
-            if _opposition_holder(board.apply(sibling)) == mover:
-                keeps_exist = True
-                break
-        if keeps_exist:
-            objections.append("obj:loses_opposition")
+    if holder_after is not None and holder_after != mover:
+        objections.append("obj:loses_opposition")
 
     # --- obj:back_rank_break — a move that prematurely breaks the back rank -
-    origin_row = _coord(move.origin - 1)[0]
-    if origin_row == _HOME_RANK[mover]:
+    # Only a MAN leaving the home rank breaks the back-rank guard (design §5:
+    # "premature king-row man move"). A king on the home rank is not a guard,
+    # so a king move off it is not a back-rank break.
+    origin_cell_br = board.cells[move.origin - 1]
+    moving_man_off_home = (
+        origin_cell_br is not None
+        and not origin_cell_br[1]
+        and _coord(move.origin - 1)[0] == _HOME_RANK[mover]
+    )
+    if moving_man_off_home:
         before = _home_rank_count(board, mover)
         after = _home_rank_count(child, mover)
         if before >= 2 and after < 2:
@@ -504,12 +571,16 @@ def _heuristic_objections(
     ):
         objections.append("obj:single_corner_drift")
 
-    # --- obj:exposes_man — a piece is en prise, the loss not proven --------
-    # The opponent has a capture available after the move (a mover piece is
-    # capturable) but the resolver did not prove a fact-tier shot — it only
-    # *looks* loose. A FACT objection already on the move supersedes this.
-    opponent_has_capture = any(m.is_jump for m in child.legal_moves())
-    if opponent_has_capture and not fact_objections:
+    # --- obj:exposes_man — a MAN is en prise, the loss not proven ----------
+    # The opponent has a capture of a mover **man** available after the move
+    # (a mover man is capturable) but the resolver did not prove a fact-tier
+    # shot — it only *looks* loose. The captured piece must be a MAN: the
+    # label and design §5 row are "man capturable"; an exposed king is a
+    # materially different fact and does not earn this witness.
+    opponent_exposes_man = any(
+        _captures_a_man(child, m) for m in child.legal_moves() if m.is_jump
+    )
+    if opponent_exposes_man and not fact_objections:
         shot = opponent_shot_result
         proven_fact_shot = shot is not None and shot.tier is Tier.FACT
         if not proven_fact_shot:
@@ -604,7 +675,7 @@ def _probe_move(
     # already covers the move — the FACT objection supersedes it.
     reasons.extend(_heuristic_reasons(board, move, child, siblings))
     objections.extend(
-        _heuristic_objections(board, move, child, siblings, objections, shot)
+        _heuristic_objections(board, move, child, objections, shot)
     )
 
     return MoveProbe(

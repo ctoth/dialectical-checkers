@@ -789,6 +789,52 @@ def test_opposition_silent_when_more_than_one_piece_a_side() -> None:
         assert "obj:loses_opposition" not in probe.objections, probe.pdn
 
 
+@pytest.mark.unit
+def test_opposition_silent_on_unequal_force_one_piece_a_side() -> None:
+    """The opposition witnesses are silent for a 1-piece-per-side unequal force.
+
+    One piece per side is necessary but NOT sufficient — the pairing-off method
+    is unambiguous only when the forces are *equal* (Pask: "in any position
+    where the forces are equal"), i.e. the two lone pieces are the same type.
+    ``B:WK10:B15`` (Red) is one piece each but a *man vs a king* — unequal
+    force. Neither ``pro:opposition`` nor ``obj:loses_opposition`` may fire;
+    the witness makes no claim rather than apply a parity rule outside its
+    defined case.
+    """
+    board = CheckersBoard.from_fen("B:WK10:B15")
+    probes = probe_moves(board)
+    assert probes, "expected legal moves"
+    for probe in probes:
+        assert "pro:opposition" not in probe.reasons, probe.pdn
+        assert "obj:loses_opposition" not in probe.objections, probe.pdn
+
+
+@pytest.mark.unit
+def test_loses_opposition_fires_when_move_lands_in_lost_ending() -> None:
+    """``obj:loses_opposition`` fires — the mirror of ``pro:opposition``.
+
+    ``B:WK8:BK15`` (Red) — a 1-king-v-1-king equal-force ending; the kings'
+    Chebyshev separation is 2 (even), so the side NOT to move (White) holds the
+    opposition. Every Red move reaches a 1-king-v-1-king ending whose
+    opposition White still holds — Red is the side in zugzwang — so every Red
+    move carries ``obj:loses_opposition`` and none carries ``pro:opposition``.
+    The move ``15-18`` is a quiet, non-terminal move: a genuine, reachable
+    firing case (the witness is not dead).
+    """
+    board = CheckersBoard.from_fen("B:WK8:BK15")
+    probes = probe_moves(board)
+    assert probes, "expected legal moves"
+    for probe in probes:
+        assert "obj:loses_opposition" in probe.objections, probe.pdn
+        assert "pro:opposition" not in probe.reasons, probe.pdn
+    # the firing move 15-18 is a quiet (non-capture), non-terminal move.
+    quiet = _probe_for(board, "15-18")
+    assert "obj:loses_opposition" in quiet.objections
+    move = next(m for m in board.legal_moves() if m.pdn() == "15-18")
+    assert not move.is_jump
+    assert not board.apply(move).is_terminal()
+
+
 # --- pro:back_rank_hold / obj:back_rank_break (STRUCTURE) -------------------
 
 
@@ -810,6 +856,29 @@ def test_back_rank_hold_and_break() -> None:
     brk = _probe_for(board, "29-25")
     assert "obj:back_rank_break" in brk.objections
     assert "pro:back_rank_hold" not in brk.reasons
+
+
+@pytest.mark.unit
+def test_back_rank_witnesses_ignore_kings_on_home_rank() -> None:
+    """The back-rank witnesses count only MEN — kings on the home rank are not
+    guards.
+
+    ``W:WK29,K32,18:B6`` (White) — White's home rank is row 7 (squares 29-32);
+    here both home-rank pieces (29 and 32) are *kings*, not men. A king on the
+    home rank is a mobile crowned piece, not an unmoved back-rank guard, so:
+
+    * moving the spare man ``18-14`` leaves zero home-rank *men* —
+      ``pro:back_rank_hold`` must NOT fire (it would, wrongly, if kings were
+      counted);
+    * moving a home-rank *king* ``29-25`` is not a man leaving the home rank —
+      ``obj:back_rank_break`` must NOT fire.
+    """
+    board = CheckersBoard.from_fen("W:WK29,K32,18:B6")
+    hold = _probe_for(board, "18-14")
+    assert "pro:back_rank_hold" not in hold.reasons
+
+    king_move = _probe_for(board, "29-25")
+    assert "obj:back_rank_break" not in king_move.objections
 
 
 # --- pro:center:{n} (STRUCTURE) --------------------------------------------
@@ -978,6 +1047,27 @@ def test_exposes_man_suppressed_by_fact_objection() -> None:
     assert "obj:exposes_man" not in probe.objections
 
 
+@pytest.mark.unit
+def test_exposes_man_silent_when_exposed_piece_is_a_king() -> None:
+    """``obj:exposes_man`` does not fire when the en-prise piece is a KING.
+
+    ``B:WK18,19:B3,8,K13,K17,K20,K30`` (Red) — the move ``17-14`` walks the
+    Red KING on 17 to square 14, where White's king on 18 can capture it
+    (``18x9``). The piece left capturable is a *king*, not a man — the label
+    and design §5 row are "man capturable", so ``obj:exposes_man`` must NOT
+    fire (an exposed king is a materially different fact).
+    """
+    board = CheckersBoard.from_fen("B:WK18,19:B3,8,K13,K17,K20,K30")
+    probe = _probe_for(board, "17-14")
+    assert "obj:exposes_man" not in probe.objections
+    # the opponent does have a capture after the move — it is the king-vs-man
+    # distinction, not the absence of a capture, that keeps the witness silent.
+    child = board.apply(
+        next(m for m in board.legal_moves() if m.pdn() == "17-14")
+    )
+    assert any(m.is_jump for m in child.legal_moves())
+
+
 # --- differential — every emitted HEURISTIC label is HEURISTIC-tier --------
 
 
@@ -986,6 +1076,7 @@ def test_exposes_man_suppressed_by_fact_objection() -> None:
     "fen",
     [
         "B:WK4:BK15",
+        "B:WK8:BK15",
         "W:W29,32,18:B6",
         "B:W30:B10",
         "B:W22,30:B6,9,13,14",
