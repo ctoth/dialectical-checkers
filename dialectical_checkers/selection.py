@@ -9,15 +9,21 @@ The FACT-tier selector key, per surviving move, lexicographic — **smaller is
 better** (the key is consumed by ``min``):
 
 1. **minimise the worst unavoidable FACT-objection magnitude.** For a move
-   that survived the crisp layer this is 0 (it carries no undefeated FACT
-   objection — it is *clean*). It is non-zero only under the design §6
-   empty-survivor fallback, where *every* move carries an undefeated FACT
-   objection and the selector must still pick the least-bad: then this term is
-   the magnitude of the move's worst FACT objection, with a forced
-   ``obj:terminal_loss`` (losing the *game*) ranked above any finite material
-   loss.
+   that is a **grounded crisp survivor** this is 0 — its ``move:`` argument is
+   in the grounded extension, so every FACT objection / reply on it is
+   *defeated* (by a keyed defense) and the move carries no unavoidable loss.
+   This term is non-zero only under the design §6 empty-survivor fallback,
+   where *no* ``move:`` argument is grounded and the selector must still pick
+   the least-bad: then this term is the magnitude of the move's worst
+   **undefeated** FACT objection / reply — an attacker still in the grounded
+   extension — with a forced ``obj:terminal_loss`` (losing the *game*) ranked
+   above any finite material loss. A FACT objection / reply that is defeated by
+   a FACT defense never contributes to this term (design §7).
 2. **maximise the FACT-tier pro value**, as the value-priority tuple
    ``winning > large material > crown > small material`` (design §7 term 2).
+   The material component is the **net** material the move keeps — its
+   immediate FACT capture minus any defended reply that recaptures part of it
+   — so a defended even exchange scores 0 material, below a clean gain.
 3. **deterministic tiebreak**: the Phase-3b static evaluation (``search.py``)
    of the position the move reaches, then the move's PDN string.
 
@@ -30,7 +36,12 @@ This module imports only ``dialectical_checkers`` and the stdlib.
 
 from __future__ import annotations
 
-from dialectical_checkers.arguments import MoveProbe, RootArgumentGraph
+from dialectical_checkers.arguments import (
+    MoveProbe,
+    RootArgumentGraph,
+    obj_arg_id,
+    reply_arg_id,
+)
 from dialectical_checkers.board import CheckersBoard, CheckersMove
 from dialectical_checkers.evidence import to_argument_evidence
 from dialectical_checkers.scheme import Tier, Value
@@ -64,26 +75,52 @@ _PHASE4_SEAM = "graded Categoriser + heuristic-pro terms — see design §7"
 _TERMINAL_LOSS_MAGNITUDE = 10**9
 
 
-def _worst_fact_objection_magnitude(probe: MoveProbe) -> int:
+def _worst_fact_objection_magnitude(
+    probe: MoveProbe, graph: RootArgumentGraph
+) -> int:
     """The worst unavoidable FACT-objection magnitude on ``probe`` (term 1).
 
-    0 when the move carries no FACT objection — it is *clean*, the normal case
-    for a move that survived the crisp layer. Otherwise the largest magnitude
-    among the move's FACT objections and reply attacks, with a forced
-    ``obj:terminal_loss`` / ``reply:terminal_loss`` (losing the game itself)
-    ranked above any finite material loss via ``_TERMINAL_LOSS_MAGNITUDE``.
+    **0 for any grounded crisp survivor** — a move whose ``move:`` argument is
+    in the grounded extension carries no *undefeated* FACT objection (every
+    objection / reply on it is defeated by a keyed FACT defense), so it has no
+    unavoidable loss. This is the normal case (design §7: "0 if clean").
 
-    Both ``objections`` and ``reply_attacks`` are consulted: design §6 has
-    both channels defeat a move in the crisp layer, so both contribute to "the
-    worst thing proven against this move".
+    Non-zero only under the design §6 empty-survivor fallback, where *no*
+    ``move:`` argument is grounded. Then this is the largest magnitude among
+    the move's **undefeated** FACT objections / reply attacks — an attacker is
+    undefeated iff its argument is itself in the grounded extension — with a
+    forced ``obj:terminal_loss`` / ``reply:terminal_loss`` (losing the game
+    itself) ranked above any finite material loss via
+    ``_TERMINAL_LOSS_MAGNITUDE``.
+
+    A FACT objection / reply defeated by a keyed FACT defense (its argument not
+    grounded) never contributes — design §7: defeated attackers on a grounded
+    survivor are not unavoidable losses. Both the objection and reply channels
+    are consulted: design §6 has both defeat a move in the crisp layer.
     """
+    move_id = graph.move_arguments.get(probe.pdn)
+    if move_id is not None and move_id in graph.grounded_extension:
+        # A grounded crisp survivor — no undefeated FACT objection stands.
+        return 0
+
     worst = 0
-    for label in (*probe.objections, *probe.reply_attacks):
+    attackers = [
+        (label, obj_arg_id(probe.pdn, label)) for label in probe.objections
+    ] + [
+        (label, reply_arg_id(probe.pdn, label))
+        for label in probe.reply_attacks
+    ]
+    for label, attacker_id in attackers:
         try:
             evidence = to_argument_evidence(label)
         except ValueError:
             continue
         if evidence.tier is not Tier.FACT:
+            continue
+        # Only an UNDEFEATED attacker — one whose argument is itself in the
+        # grounded extension — is an unavoidable loss. A keyed defense that
+        # defeated it removes it from the grounded extension, so it is skipped.
+        if attacker_id not in graph.grounded_extension:
             continue
         if evidence.value is Value.WINNING:
             # obj:terminal_loss / reply:terminal_loss — a forced GAME loss.
@@ -101,8 +138,56 @@ def _worst_fact_objection_magnitude(probe: MoveProbe) -> int:
 # /magnitude so that, among moves at the same priority level, more is better.
 # The key is consumed by ``min``, so the tuple is NEGATED to make "more pro"
 # sort earlier.
+#
+# The pro material value is a **NET** quantity. A grounded crisp survivor can
+# still carry a FACT ``reply:material`` attack that a keyed ``defense:`` only
+# DEFEATS (it does not erase the giveback): the move captures material, then
+# the opponent's defended forcing reply recaptures part of it. The move's pro
+# VALUE is what it actually keeps — the immediate ``pro:material`` minus the
+# material handed back by every defended reply. Using the gross immediate
+# capture would tie a move that nets +200 with one that grabs 200 and gives
+# 100 back, and a clean +100 with a held-even 0 — that is exactly the selector
+# defect MAJOR 1's term-1 fix uncovered. Ranking on the net keeps design §7's
+# "maximise FACT-tier pro value" honest: the value is the material kept.
 
 _LARGE_MATERIAL_THRESHOLD = 100  # strictly more than one man is "large"
+
+
+def _defended_reply_giveback(probe: MoveProbe) -> int:
+    """The FACT material a move's keyed defenses concede back to the opponent.
+
+    A ``defense:holds_exchange@{answered}`` on a grounded survivor proves the
+    exchange is even or favourable, but the opponent's ``{answered}`` forcing
+    reply still recaptures its ``reply:material:{n}`` worth of material. The
+    move's net pro material is its immediate capture minus this giveback. Sums
+    the magnitudes of every distinct defended FACT ``reply:material`` so a move
+    with several defended replies concedes each one's material.
+    """
+    giveback = 0
+    seen: set[str] = set()
+    for label in probe.defenses:
+        try:
+            evidence = to_argument_evidence(label)
+        except ValueError:
+            continue
+        if evidence.tier is not Tier.FACT or evidence.answered is None:
+            continue
+        answered = evidence.answered
+        if answered in seen:
+            continue
+        seen.add(answered)
+        try:
+            answered_evidence = to_argument_evidence(answered)
+        except ValueError:
+            continue
+        # Only a finite material reply concedes measurable material here; a
+        # terminal-loss reply is not a "giveback", it is handled by term 1.
+        if (
+            answered_evidence.value is Value.MATERIAL
+            and answered_evidence.magnitude is not None
+        ):
+            giveback += answered_evidence.magnitude
+    return giveback
 
 
 def _fact_pro_priority(probe: MoveProbe) -> tuple[int, int, int, int]:
@@ -113,19 +198,22 @@ def _fact_pro_priority(probe: MoveProbe) -> tuple[int, int, int, int]:
 
     * ``winning`` — 1 if the move carries ``pro:terminal_win`` (realises the
       ``winning`` value — ends the game in the mover's favour), else 0.
-    * ``large_material`` — the largest FACT material magnitude on the move
-      (``pro:material`` / ``pro:shot_setup``) that exceeds one man, else 0.
+    * ``large_material`` — the **net** FACT material the move keeps (the
+      largest ``pro:material`` / ``pro:shot_setup`` magnitude minus the
+      :func:`_defended_reply_giveback`) when that net exceeds one man, else 0.
     * ``crown`` — 1 if the move carries ``pro:crown``, else 0.
-    * ``small_material`` — the largest FACT material magnitude on the move
-      that is at most one man, else 0.
+    * ``small_material`` — the net FACT material the move keeps when it is
+      positive and at most one man, else 0.
 
     Design §7 orders these strictly: winning beats large material beats crown
-    beats small material.
+    beats small material. The material the move *keeps* — net of any defended
+    reply that recaptures part of it — is the honest pro value (see the module
+    note above); a defended even exchange therefore scores 0 material, below a
+    genuine clean material gain.
     """
     winning = 0
     crown = 0
-    large_material = 0
-    small_material = 0
+    gross_material = 0
     for label in probe.reasons:
         try:
             evidence = to_argument_evidence(label)
@@ -138,10 +226,17 @@ def _fact_pro_priority(probe: MoveProbe) -> tuple[int, int, int, int]:
         elif evidence.value is Value.KING_COUNT:
             crown = 1
         elif evidence.value is Value.MATERIAL and evidence.magnitude is not None:
-            if evidence.magnitude > _LARGE_MATERIAL_THRESHOLD:
-                large_material = max(large_material, evidence.magnitude)
-            else:
-                small_material = max(small_material, evidence.magnitude)
+            gross_material = max(gross_material, evidence.magnitude)
+
+    # Net the gross immediate material against any defended-reply giveback —
+    # the move's pro value is the material it actually keeps (module note).
+    net_material = gross_material - _defended_reply_giveback(probe)
+    large_material = 0
+    small_material = 0
+    if net_material > _LARGE_MATERIAL_THRESHOLD:
+        large_material = net_material
+    elif net_material > 0:
+        small_material = net_material
     return (winning, large_material, crown, small_material)
 
 
@@ -149,14 +244,18 @@ def _fact_pro_priority(probe: MoveProbe) -> tuple[int, int, int, int]:
 
 
 def _selection_key(
-    probe: MoveProbe, board: CheckersBoard | None
+    probe: MoveProbe,
+    graph: RootArgumentGraph,
+    board: CheckersBoard | None,
 ) -> tuple[int, int, int, int, int, int, str]:
     """The FACT-tier lexicographic selection key for ``probe`` (design §7).
 
     Smaller is better — the key is consumed by ``min``. The components, in
     order:
 
-    1. the worst unavoidable FACT-objection magnitude (minimised);
+    1. the worst unavoidable FACT-objection magnitude (minimised) — 0 for any
+       grounded crisp survivor, non-zero only in the §6 empty-survivor
+       fallback (see :func:`_worst_fact_objection_magnitude`);
     2-5. the FACT pro-value priority tuple, negated so "more pro" sorts first
        (winning, large material, crown, small material);
     6. the static evaluation of the reached position, negated so a higher
@@ -166,12 +265,16 @@ def _selection_key(
     The Phase-4 graded terms (``_PHASE4_SEAM``) would slot in between
     components 5 and 6 when implemented.
 
+    ``graph`` is the crisp Dung graph the probes were evaluated against — term
+    1 reads its grounded extension to tell a grounded survivor (term 1 = 0)
+    from an empty-survivor-fallback move.
+
     ``board`` is the position the moves are played from; it is needed to apply
     the move for the static-eval tiebreak. When it is ``None`` the static-eval
     component is 0 — the PDN tiebreak still makes the key total and
     deterministic.
     """
-    objection_magnitude = _worst_fact_objection_magnitude(probe)
+    objection_magnitude = _worst_fact_objection_magnitude(probe, graph)
     winning, large_material, crown, small_material = _fact_pro_priority(probe)
 
     if board is not None:
@@ -244,4 +347,4 @@ def choose_move(
     if not candidates:
         candidates = list(probes)
 
-    return min(candidates, key=lambda p: _selection_key(p, board))
+    return min(candidates, key=lambda p: _selection_key(p, graph, board))

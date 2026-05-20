@@ -14,7 +14,11 @@ The crisp argument families (design §6), one Dung argument per row:
 * ``reply:{pdn}:{label}`` — one per **FACT-tier** reply attack on a move.
   Defeats that move's ``move:`` argument.
 * ``defense:{pdn}:{label}`` — one per **FACT-tier** proven defense on a move.
-  Defeats the objection / reply arguments on the *same* move.
+  Defeats *only* the one objection / reply argument it is keyed to answer
+  (design §6 — "and only that one"). A defense label is keyed
+  ``defense:holds_exchange@{answered}``; the ``@{answered}`` part names the
+  exact objection / reply label the defense answers, and the defense argument
+  defeats only that attacker on the same move.
 
 There is **no ``doubt`` node** — soft reasoning lives in the graded layer
 (§7), so the ``doubt`` node has no remaining job. There are **no duplicated /
@@ -100,13 +104,22 @@ def _move_arg(pdn: str) -> str:
     return f"move:{pdn}"
 
 
-def _obj_arg(pdn: str, label: str) -> str:
-    """The objection argument id for FACT objection ``label`` on move ``pdn``."""
+def obj_arg_id(pdn: str, label: str) -> str:
+    """The objection argument id for FACT objection ``label`` on move ``pdn``.
+
+    Public so the selector (``selection.py``) can reconstruct the same
+    objection argument id and ask whether that attacker is in the grounded
+    extension — i.e. still *undefeated* (design §7 selector key term 1).
+    """
     return f"obj:{pdn}:{label}"
 
 
-def _reply_arg(pdn: str, label: str) -> str:
-    """The reply-attack argument id for FACT reply ``label`` on move ``pdn``."""
+def reply_arg_id(pdn: str, label: str) -> str:
+    """The reply-attack argument id for FACT reply ``label`` on move ``pdn``.
+
+    Public for the same reason as :func:`obj_arg_id` — the selector needs to
+    identify a reply attacker's argument to test whether it is undefeated.
+    """
     return f"reply:{pdn}:{label}"
 
 
@@ -139,9 +152,14 @@ def build_root_argument_graph(probes: list[MoveProbe]) -> RootArgumentGraph:
     * for every **FACT-tier** reply attack on the probe, a ``reply:``
       argument that defeats the move;
     * for every **FACT-tier** defense on the probe, a ``defense:`` argument
-      that defeats *every* objection and reply argument on the *same* move
-      (design §5/§6: a proven defense answers the objection/reply that the
-      resolver showed is refuted).
+      that defeats *only* the one objection / reply argument it is keyed to
+      answer (design §6: a proven defense answers "the objection/reply ``x`` it
+      answers, and only that one"). The defense label is keyed
+      ``defense:holds_exchange@{answered}``; the defense argument defeats the
+      attacker built from ``{answered}`` on the same move and nothing else. A
+      keyed defense whose answered label is not present among the move's FACT
+      attackers defeats nothing — it cannot restore a move on an attack the
+      probe never raised.
 
     No ``doubt`` argument, no duplicated arguments — every id is distinct.
     HEURISTIC witnesses are filtered out. The grounded extension is computed
@@ -159,29 +177,38 @@ def build_root_argument_graph(probes: list[MoveProbe]) -> RootArgumentGraph:
         arguments.add(move_id)
 
         # FACT-tier objections / reply attacks defeat this move's argument.
+        # ``attacker_by_label`` maps the *witness label* of each FACT attacker
+        # to its argument id, so a keyed defense can locate the one attacker it
+        # answers (design §6 — "and only that one").
         fact_objections = [o for o in probe.objections if _is_fact(o)]
         fact_replies = [r for r in probe.reply_attacks if _is_fact(r)]
-        attacker_ids: list[str] = []
+        attacker_by_label: dict[str, str] = {}
         for label in fact_objections:
-            arg_id = _obj_arg(probe.pdn, label)
+            arg_id = obj_arg_id(probe.pdn, label)
             arguments.add(arg_id)
             defeats.add((arg_id, move_id))
-            attacker_ids.append(arg_id)
+            attacker_by_label[label] = arg_id
         for label in fact_replies:
-            arg_id = _reply_arg(probe.pdn, label)
+            arg_id = reply_arg_id(probe.pdn, label)
             arguments.add(arg_id)
             defeats.add((arg_id, move_id))
-            attacker_ids.append(arg_id)
+            attacker_by_label[label] = arg_id
 
-        # FACT-tier defenses defeat the move's objection / reply arguments —
-        # a proven defense refutes them, restoring the move (design §6).
+        # FACT-tier defenses defeat ONLY the one objection / reply they are
+        # keyed to answer — a proven defense refutes exactly that attacker,
+        # restoring the move only if no *other* attacker still stands (§6).
         for label in probe.defenses:
             if not _is_fact(label):
                 continue
+            answered = to_argument_evidence(label).answered
             arg_id = _defense_arg(probe.pdn, label)
             arguments.add(arg_id)
-            for attacked in attacker_ids:
-                defeats.add((arg_id, attacked))
+            # A keyed defense defeats only its answered attacker on this move.
+            # If the answered label is absent (the probe never raised it) the
+            # defense argument exists but defeats nothing — it cannot restore a
+            # move against an attack that was never made.
+            if answered is not None and answered in attacker_by_label:
+                defeats.add((arg_id, attacker_by_label[answered]))
 
     framework = ArgumentationFramework(
         arguments=frozenset(arguments),

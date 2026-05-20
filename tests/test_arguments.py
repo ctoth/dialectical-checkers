@@ -92,25 +92,124 @@ def test_move_with_undefeated_reply_attack_is_eliminated() -> None:
 
 @pytest.mark.unit
 def test_fact_defense_restores_its_move() -> None:
-    """A FACT defense that defeats an objection restores its move.
+    """A FACT defense keyed to an objection restores its move.
 
     A probe carries both a FACT reply attack (``reply:material:100``) and a
-    FACT defense (``defense:holds_exchange``). The defense argument defeats the
-    reply argument; the reply is then not grounded, the ``move:`` argument has
-    no undefeated attacker, and the move is back in the grounded extension.
+    FACT defense keyed to it (``defense:holds_exchange@reply:material:100``).
+    The defense argument defeats *that* reply argument; the reply is then not
+    grounded, the ``move:`` argument has no undefeated attacker, and the move
+    is back in the grounded extension.
     """
     probes = [
         MoveProbe(
             pdn="2x11",
             reasons=("pro:material:100",),
             reply_attacks=("reply:material:100",),
-            defenses=("defense:holds_exchange",),
+            defenses=("defense:holds_exchange@reply:material:100",),
         )
     ]
     graph = build_root_argument_graph(probes)
     move_id = graph.move_arguments["2x11"]
     assert move_id in graph.grounded_extension
     assert "2x11" in graph.survivors
+
+
+@pytest.mark.unit
+def test_keyed_defense_defeats_only_its_answered_attack() -> None:
+    """A keyed defense defeats ONLY the objection / reply it answers (§6).
+
+    Phase 3b analyst MAJOR-2 regression: a probe with two *independent* FACT
+    attacks — ``reply:material:100`` and ``reply:material:200`` — and one
+    defense keyed to the smaller (``defense:holds_exchange@reply:material:100``).
+    The defense argument must defeat ONLY the ``reply:material:100`` argument;
+    the ``reply:material:200`` attack is unanswered and still defeats the move,
+    which therefore stays NON-grounded. The pre-fix construction wired the
+    defense to *every* attacker and wrongly restored the move.
+
+    A second, clean move is present so the §6 empty-survivor fallback does not
+    fire — that way ``survivors`` reflects genuine grounding, not the
+    every-move fallback.
+    """
+    probe = MoveProbe(
+        pdn="7x14",
+        reasons=("pro:material:100",),
+        reply_attacks=("reply:material:100", "reply:material:200"),
+        defenses=("defense:holds_exchange@reply:material:100",),
+    )
+    clean = MoveProbe(pdn="6-10", reasons=("pro:crown",))
+    graph = build_root_argument_graph([probe, clean])
+    move_id = graph.move_arguments["7x14"]
+    defense_id = "defense:7x14:defense:holds_exchange@reply:material:100"
+    answered_id = "reply:7x14:reply:material:100"
+    unanswered_id = "reply:7x14:reply:material:200"
+    # The defense defeats ONLY the reply it is keyed to.
+    assert (defense_id, answered_id) in graph.defeats
+    assert (defense_id, unanswered_id) not in graph.defeats
+    # The answered reply is defeated; the unanswered reply still stands.
+    assert answered_id not in graph.grounded_extension
+    assert unanswered_id in graph.grounded_extension
+    # ...so the move is NOT restored — it stays out of the grounded extension
+    # and out of the survivor set (the clean move keeps the fallback dormant).
+    assert move_id not in graph.grounded_extension
+    assert "7x14" not in graph.survivors
+    assert graph.survivors == frozenset({"6-10"})
+
+
+@pytest.mark.unit
+def test_keyed_defense_with_objection_and_reply_defeats_only_keyed_one() -> None:
+    """A defense keyed to one of an objection + a reply restores nothing alone.
+
+    The probe carries an independent FACT objection (``obj:allows_shot:100``)
+    and a FACT reply (``reply:material:200``); the defense is keyed only to the
+    reply. The objection is unanswered, so the move stays non-grounded — design
+    §6's "and only that one" holds across the objection and reply channels.
+    """
+    probe = MoveProbe(
+        pdn="9-14",
+        objections=("obj:allows_shot:100",),
+        reply_attacks=("reply:material:200",),
+        defenses=("defense:holds_exchange@reply:material:200",),
+    )
+    clean = MoveProbe(pdn="6-10", reasons=("pro:crown",))
+    graph = build_root_argument_graph([probe, clean])
+    defense_id = "defense:9-14:defense:holds_exchange@reply:material:200"
+    obj_id = "obj:9-14:obj:allows_shot:100"
+    reply_id = "reply:9-14:reply:material:200"
+    # The defense defeats the keyed reply only — never the objection.
+    assert (defense_id, reply_id) in graph.defeats
+    assert (defense_id, obj_id) not in graph.defeats
+    # The unanswered objection still stands; the move is not restored.
+    assert obj_id in graph.grounded_extension
+    assert graph.move_arguments["9-14"] not in graph.grounded_extension
+    assert "9-14" not in graph.survivors
+    assert graph.survivors == frozenset({"6-10"})
+
+
+@pytest.mark.unit
+def test_keyed_defense_for_absent_attack_restores_nothing() -> None:
+    """A defense keyed to an attack the probe never raised defeats nothing.
+
+    The probe carries one undefeated FACT reply (``reply:material:100``) and a
+    defense keyed to a *different*, absent label (``reply:material:999``). The
+    defense argument exists but, having no matching attacker, defeats nothing —
+    it cannot restore the move against the attack actually made.
+    """
+    probe = MoveProbe(
+        pdn="13-17",
+        reply_attacks=("reply:material:100",),
+        defenses=("defense:holds_exchange@reply:material:999",),
+    )
+    clean = MoveProbe(pdn="6-10", reasons=("pro:crown",))
+    graph = build_root_argument_graph([probe, clean])
+    defense_id = "defense:13-17:defense:holds_exchange@reply:material:999"
+    # The defense argument is declared but defeats nothing.
+    assert defense_id in graph.arguments
+    assert not any(src == defense_id for src, _ in graph.defeats)
+    # The genuine reply is undefeated; the move stays non-grounded and out of
+    # the survivor set (the clean move keeps the §6 fallback dormant).
+    assert graph.move_arguments["13-17"] not in graph.grounded_extension
+    assert "13-17" not in graph.survivors
+    assert graph.survivors == frozenset({"6-10"})
 
 
 @pytest.mark.unit

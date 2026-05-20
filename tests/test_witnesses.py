@@ -280,14 +280,22 @@ def test_defense_when_resolver_refutes_apparent_reply() -> None:
     recapture (a proven forcing ``reply`` netting White 100), but the resolver
     proves the mover's net swing across the whole line is 0 — the exchange is
     held even. The opponent's reply is therefore refuted, so the move carries
-    ``defense:holds_exchange``, which answers that reply.
+    a ``defense:holds_exchange@{answered}`` defense **keyed** to that exact
+    reply (design §6 — a defense answers "the objection/reply it answers, and
+    only that one").
     """
     board = CheckersBoard.from_fen("B:W7,23:B2,18")
     probe = _probe_for(board, "2x11")
     facts = _fact_labels(probe)
-    assert "defense:holds_exchange" in facts
+    # The defense is keyed to the reply it answers.
+    assert "defense:holds_exchange@reply:material:100" in facts
     # The defense answers a genuine, proven forcing reply.
     assert "reply:material:100" in facts
+    # The keyed defense names exactly the reply on the same probe.
+    from dialectical_checkers.evidence import to_argument_evidence
+
+    defense = next(d for d in probe.defenses if d.startswith("defense:"))
+    assert to_argument_evidence(defense).answered == "reply:material:100"
 
 
 # ---------------------------------------------------------------------------

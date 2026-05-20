@@ -44,9 +44,13 @@ CQ17 reply attacks (``MoveProbe.reply_attacks``):
 
 Proven defenses (``MoveProbe.defenses``):
 
-* ``defense:holds_exchange`` — a capture move for which the opponent has a
-  proven forcing recapture, but the resolver proves the mover's net swing
+* ``defense:holds_exchange@{answered}`` — a capture move for which the opponent
+  has a proven forcing recapture, but the resolver proves the mover's net swing
   across the whole line is even or favourable: the apparent reply is refuted.
+  The defense is **keyed** to the specific reply it answers (design §6 — "and
+  only that one"): ``{answered}`` is the exact ``reply:material:{n}`` label the
+  same probe emits, so the crisp layer can wire ``defense -> only that reply``
+  instead of over-defeating every attacker on the move.
 
 The ``allows_shot`` / ``loses_exchange`` split — both FACT, both
 resolver-sourced, with overlapping conditions in design §5 — is partitioned by
@@ -162,7 +166,8 @@ def _probe_move(board: CheckersBoard, move: CheckersMove) -> MoveProbe:
             reply_attacks.append("reply:terminal_loss")
         elif shot.terminal is None:
             # A forced material gain for the opponent (the game does not end).
-            reply_attacks.append(f"reply:material:{shot.material_net}")
+            reply_label = f"reply:material:{shot.material_net}"
+            reply_attacks.append(reply_label)
             if move.is_jump:
                 # A capture move: the mover's net swing across the whole line
                 # is its own immediate capture minus the opponent's proven
@@ -172,7 +177,11 @@ def _probe_move(board: CheckersBoard, move: CheckersMove) -> MoveProbe:
                 if mover_swing < 0:
                     objections.append(f"obj:loses_exchange:{-mover_swing}")
                 else:
-                    defenses.append("defense:holds_exchange")
+                    # The defense answers exactly this reply — keyed to it so
+                    # the crisp layer defeats only that attacker (design §6).
+                    defenses.append(
+                        f"defense:holds_exchange@{reply_label}"
+                    )
             else:
                 # A quiet move that walks into a forced combination.
                 objections.append(f"obj:allows_shot:{shot.material_net}")

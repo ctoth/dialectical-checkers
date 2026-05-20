@@ -103,6 +103,78 @@ def test_magnitudeless_labels_have_none_magnitude(label: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# unit — keyed defense labels (design §6 — a defense answers ONE attack)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "label,answered",
+    [
+        (
+            "defense:holds_exchange@reply:material:100",
+            "reply:material:100",
+        ),
+        (
+            "defense:holds_exchange@reply:terminal_loss",
+            "reply:terminal_loss",
+        ),
+        (
+            "defense:holds_exchange@obj:allows_shot:250",
+            "obj:allows_shot:250",
+        ),
+    ],
+    ids=lambda v: str(v),
+)
+def test_keyed_defense_carries_its_answered_target(
+    label: str, answered: str
+) -> None:
+    """A keyed defense parses to FACT MATERIAL evidence carrying ``answered``.
+
+    Design §6: a defense answers "the objection/reply it answers, and only that
+    one". The keyed label ``defense:holds_exchange@{answered}`` parses so the
+    ``answered`` field names that exact target.
+    """
+    evidence = to_argument_evidence(label)
+    assert evidence.value is Value.MATERIAL
+    assert evidence.tier is Tier.FACT
+    assert evidence.answered == answered
+
+
+@pytest.mark.unit
+def test_unkeyed_defense_has_no_answered_target() -> None:
+    """The bare, un-keyed ``defense:holds_exchange`` parses with ``answered`` None.
+
+    The parser still accepts the bare defense type (it is valid evidence), but
+    ``witnesses.py`` never emits it — every emitted defense is keyed.
+    """
+    evidence = to_argument_evidence("defense:holds_exchange")
+    assert evidence.tier is Tier.FACT
+    assert evidence.answered is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "label",
+    [
+        "defense:holds_exchange@",            # empty answered target
+        "defense:holds_exchange@garbage",     # answered target unknown
+        "defense:holds_exchange@pro:crown",   # answered a non-attack label
+        "defense:unknown@reply:material:100",  # unknown defense type
+        "obj:allows_shot@reply:material:100",  # @ on a non-defense label
+    ],
+)
+def test_malformed_keyed_defense_raises(label: str) -> None:
+    """A malformed keyed defense label raises rather than being mistyped.
+
+    The defense type must be a known ``defense:`` label, and the answered
+    target must itself be a valid objection / reply label.
+    """
+    with pytest.raises(ValueError):
+        to_argument_evidence(label)
+
+
+# ---------------------------------------------------------------------------
 # unit — malformed / unknown labels are rejected, never silently mistyped
 # ---------------------------------------------------------------------------
 

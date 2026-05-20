@@ -12,10 +12,15 @@ Four test families, mirroring the directive:
 * ``property`` — LEGALITY: across >=300 deterministic-seeded reached positions
   with legal moves, ``choose_move`` returns a move in ``legal_moves()``.
 * ``property`` — NO AVOIDABLE FORCED LOSS: across >=200 seeded positions, if
-  some legal move avoids giving the opponent a forced material/game win, the
-  engine must pick such a move. The "forced loss" classifier is the verified
-  Phase-2 forced-capture resolver (``captures.opponent_shot``) — an INDEPENDENT
-  oracle of the loss, not the engine's own selection.
+  some legal move avoids handing the opponent a forced NET material/game win,
+  the engine must pick such a move. The "forced loss" classifier is the
+  verified Phase-2 forced-capture resolver (``captures.resolve``) — an
+  INDEPENDENT oracle of the loss, not the engine's own selection. It is a
+  *net*-outcome oracle: a capture move that immediately wins more material than
+  the opponent's forced reply recaptures is NOT a loss (a defended favourable
+  exchange), so the classifier nets the mover's own immediate capture gain
+  against the opponent's forced continuation rather than treating any opponent
+  recapture as a loss.
 * ``differential`` — the curated tactical corpus: >=8 positions with a free
   winning shot/capture (the engine must take it) and >=6 positions where some
   moves lose and others are safe (the engine must pick a safe one). Every
@@ -39,7 +44,7 @@ from dialectical_checkers import (
     EngineDecision,
 )
 from dialectical_checkers.board import CheckersBoard, CheckersMove
-from dialectical_checkers.captures import Tier, opponent_shot
+from dialectical_checkers.captures import KING_VALUE, MAN_VALUE, Tier, resolve
 
 
 # ---------------------------------------------------------------------------
@@ -90,25 +95,67 @@ def _seeded_positions(target: int) -> list[CheckersBoard]:
     return out
 
 
+def _weighted_material(board: CheckersBoard, side: str) -> int:
+    """Weighted material for ``side`` on ``board`` — man=100, king=150.
+
+    The same weighting the resolver uses; the net-outcome oracle below needs it
+    to measure the mover's own immediate capture gain across ``move``.
+    """
+    total = 0
+    for cell in board.cells:
+        if cell is None or cell[0] != side:
+            continue
+        total += KING_VALUE if cell[1] else MAN_VALUE
+    return total
+
+
+def _net_material(board: CheckersBoard, side: str) -> int:
+    """Weighted material balance on ``board`` from ``side``'s perspective."""
+    other = "w" if side == "r" else "r"
+    return _weighted_material(board, side) - _weighted_material(board, other)
+
+
 def _gives_opponent_forced_win(board: CheckersBoard, move: CheckersMove) -> bool:
-    """True iff ``move`` hands the opponent a forced material/game win.
+    """True iff ``move`` hands the opponent a forced NET material/game win.
 
     The classifier is INDEPENDENT of the engine's selection: it applies
-    ``move`` and asks the verified Phase-2 forced-capture resolver
-    (``captures.opponent_shot``) whether the opponent then has a *proven*
-    (``Tier.FACT``) forced sequence netting material or winning the game.
+    ``move`` and resolves the resulting forced-capture line with the verified
+    Phase-2 forced-capture resolver (``captures.resolve``).
 
-    A truncated (``Tier.HEURISTIC``) resolver result is NOT treated as a
-    forced loss — it was not proven, and the engine is judged only on proven
-    losses (honest about what the resolver established).
+    It is a *net*-outcome oracle, not a "did the opponent capture anything"
+    test. ``captures.resolve`` on the position AFTER ``move`` reports the swing
+    from the OPPONENT's perspective across the whole mandatory-capture line. A
+    capture ``move`` also wins material immediately — its own jumps — so the
+    mover's NET outcome is its own immediate capture gain minus the opponent's
+    forced continuation. A defended favourable exchange (the mover captures
+    more than the opponent recaptures, e.g. ``6x15x22`` on
+    ``B:W10,17,18:B6,13,14`` — own gain 200, opponent reply 100, net +100) is
+    therefore NOT a loss. ``move`` is a forced loss iff the resolved line ends
+    the game for the opponent, or the mover's net material across the line is
+    strictly negative.
+
+    A truncated (``Tier.HEURISTIC``) resolved line is NOT treated as a forced
+    loss — it was not proven, and the engine is judged only on proven losses
+    (honest about what the resolver established).
     """
-    shot = opponent_shot(board, move)
-    if shot is None or shot.tier is not Tier.FACT:
-        return False
     mover = board.turn
-    wins_game = shot.terminal is not None and shot.terminal != mover
-    wins_material = shot.terminal is None and shot.material_net > 0
-    return wins_game or wins_material
+    child = board.apply(move)
+    line = resolve(child)
+    if line.tier is not Tier.FACT:
+        # The line was budget-truncated — not a proven forced loss.
+        return False
+    if line.terminal is not None:
+        # The forced line ends the game: a loss iff the opponent wins it.
+        return line.terminal != mover
+    # ``line.material_swing`` is from the OPPONENT's perspective (the side to
+    # move at ``child``). The mover's own immediate capture gain across
+    # ``move`` is the change in the mover's balance from the root to the child.
+    # NET for the mover = that own gain minus the opponent's forced reply.
+    mover_immediate_gain = _net_material(child, mover) - _net_material(
+        board, mover
+    )
+    net_for_mover = mover_immediate_gain - line.material_swing
+    return net_for_mover < 0
 
 
 # ---------------------------------------------------------------------------
@@ -335,3 +382,35 @@ def test_engine_picks_a_safe_move(fen: str, losing_moves: frozenset[str]) -> Non
 def test_safe_vs_losing_corpus_has_at_least_six_positions() -> None:
     """The directive requires >=6 safe-vs-losing positions."""
     assert len(SAFE_VS_LOSING_CORPUS) >= 6
+
+
+# ---------------------------------------------------------------------------
+# differential — Phase 3b selector regression (the analyst MAJOR-1 position)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.differential
+def test_engine_chooses_verified_better_defended_capture() -> None:
+    """Regression: on ``B:W10,17,18:B6,13,14`` the engine plays ``6x15x22``.
+
+    The Phase 3b analyst MAJOR-1 finding: the selector's first key term counted
+    a FACT reply even when a keyed FACT defense had defeated it and the move
+    was a grounded crisp survivor. That inverted the selector — the engine
+    played ``14x23`` (net +50) over the verified-better ``6x15x22`` (net +200,
+    captures 200 and only concedes a defended 100). Both ``6x15x22`` and
+    ``14x23`` are grounded crisp survivors here, so the corrected term 1 is 0
+    for both; ``6x15x22`` then wins on net FACT pro material (200 vs 100). The
+    engine must choose ``6x15x22``.
+    """
+    engine = DialecticalCheckersEngine()
+    board = CheckersBoard.from_fen("B:W10,17,18:B6,13,14")
+    analysis = engine.analyze(board)
+    # Both defended captures are grounded crisp survivors (term 1 = 0 for each).
+    assert {"6x15x22", "14x23"} <= analysis.graph.survivors
+    assert analysis.decision.move_pdn == "6x15x22", (
+        analysis.decision.move_pdn,
+        "engine must play the verified-better defended +200 capture",
+    )
+    # The corrected NET-outcome loss oracle agrees ``6x15x22`` is NOT a loss.
+    move = {m.pdn(): m for m in board.legal_moves()}["6x15x22"]
+    assert not _gives_opponent_forced_win(board, move)
