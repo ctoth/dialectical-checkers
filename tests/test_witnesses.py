@@ -98,22 +98,31 @@ def test_probe_moves_one_probe_per_legal_move() -> None:
 
 
 @pytest.mark.unit
-def test_every_emitted_label_is_typed_fact() -> None:
-    """Every label any probe emits is a FACT-tier label parseable by evidence.
+def test_every_emitted_label_is_typed() -> None:
+    """Every label any probe emits is parseable typed evidence (design §5).
 
-    Phase 3a is the FACT-tier layer only — no HEURISTIC label may leak out.
+    Phase 4 adds the HEURISTIC-tier rows, so an emitted label may be FACT or
+    HEURISTIC — but it must always be a *known, typed* label: ``evidence.py``
+    must parse it without raising. No untyped / unknown label may ever leak
+    out of the witness layer.
     """
     for fen in (
         "B:W18,26:B15",
         "B:W22,30:B6,9,13,14",
         "B:W10,17,18:B6,13,14",
         "B:W21:B27",
+        "B:WK4:BK15",
+        "B:W13,16:B8,9",
     ):
         board = CheckersBoard.from_fen(fen)
         for probe in probe_moves(board):
             for label in _all_labels(probe):
                 evidence = to_argument_evidence(label)
-                assert evidence.tier is Tier.FACT, (fen, probe.pdn, label)
+                assert evidence.tier in (Tier.FACT, Tier.HEURISTIC), (
+                    fen,
+                    probe.pdn,
+                    label,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -513,14 +522,15 @@ def test_terminal_win_iff_child_terminal_for_mover(fen: str) -> None:
 
 @pytest.mark.differential
 @pytest.mark.parametrize("fen", CONSISTENCY_FENS, ids=lambda v: v)
-def test_every_emitted_consistency_label_is_fact(fen: str) -> None:
-    """Across the consistency sample every emitted witness is FACT-tier.
+def test_every_emitted_consistency_label_is_typed(fen: str) -> None:
+    """Across the consistency sample every emitted witness is typed (design §5).
 
-    Phase 3a emits only FACT witnesses; this sanity-checks the whole emitted
-    set across the differential sample. It does NOT, on its own, prove the
-    tier discipline of ``witnesses.py`` — see the monkeypatched truncation
-    tests below, which genuinely drive a ``Tier.HEURISTIC`` resolver result
-    through ``probe_moves()`` and exercise the tier guards directly.
+    Phase 4 emits HEURISTIC witnesses alongside FACT ones, so a label may be of
+    either tier — this sanity-checks that every emitted label across the
+    differential sample is *parseable typed evidence* (FACT or HEURISTIC),
+    never an untyped/unknown string. The resolver-FACT tier discipline (no
+    FACT witness from a truncated resolver) is proven separately by the
+    monkeypatched truncation tests below.
     """
     board = CheckersBoard.from_fen(fen)
     for probe in probe_moves(board):
@@ -530,11 +540,10 @@ def test_every_emitted_consistency_label_is_fact(fen: str) -> None:
             *probe.reply_attacks,
             *probe.defenses,
         ):
-            assert to_argument_evidence(label).tier is Tier.FACT, (
-                fen,
-                probe.pdn,
-                label,
-            )
+            assert to_argument_evidence(label).tier in (
+                Tier.FACT,
+                Tier.HEURISTIC,
+            ), (fen, probe.pdn, label)
 
 
 # ---------------------------------------------------------------------------
@@ -625,8 +634,15 @@ def test_heuristic_opponent_shot_yields_no_fact_objection(
     Drives a truncated (``Tier.HEURISTIC``) resolver result through
     ``probe_moves()``: ``witnesses.opponent_shot`` is monkeypatched to return a
     HEURISTIC ``ShotResult``. The ``shot.tier is Tier.FACT`` guard in
-    ``witnesses.py`` must suppress every objection, reply attack, and defense
-    derived from it — removing that guard makes this test fail.
+    ``witnesses.py`` must suppress every **FACT** objection, reply attack, and
+    defense derived from the resolver — removing that guard makes this test
+    fail.
+
+    The assertion is on the FACT-tier witnesses only: a HEURISTIC
+    ``opponent_shot`` may still leave HEURISTIC objections standing (notably
+    ``obj:exposes_man``, which fires precisely *because* the resolver did not
+    prove a FACT shot — design §5). Phase 4 added those; the resolver-FACT
+    discipline this test guards is unchanged.
     """
     monkeypatch.setattr(
         witnesses,
@@ -635,7 +651,12 @@ def test_heuristic_opponent_shot_yields_no_fact_objection(
     )
     probe = _probe_for(CheckersBoard.from_fen(_QUIET_FEN), _QUIET_PDN)
     derived = [*probe.objections, *probe.reply_attacks, *probe.defenses]
-    assert derived == [], derived
+    fact_derived = [
+        label
+        for label in derived
+        if to_argument_evidence(label).tier is Tier.FACT
+    ]
+    assert fact_derived == [], fact_derived
 
 
 @pytest.mark.unit
@@ -697,3 +718,296 @@ def test_heuristic_resolver_result_emits_no_fact_witness_anywhere(
                     probe.pdn,
                     label,
                 )
+
+
+# ---------------------------------------------------------------------------
+# unit — HEURISTIC-tier witnesses (design §5, Phase 4)
+# ---------------------------------------------------------------------------
+#
+# Each test below is a curated, hand-verified position exercising one HEURISTIC
+# witness against its precise definition (see the ``witnesses.py`` module
+# docstring). The positions were independently hand-verified by the
+# ``scripts/phase4_*`` smoke / search scripts. A HEURISTIC witness is a
+# positional judgement — it carries no oracle proof — but its firing condition
+# is deterministic, and these tests pin that exact condition.
+
+
+def _heuristic_labels(probe: MoveProbe) -> set[str]:
+    """The set of HEURISTIC-tier witness labels on ``probe``."""
+    return {
+        label
+        for label in _all_labels(probe)
+        if to_argument_evidence(label).tier is Tier.HEURISTIC
+    }
+
+
+# --- pro:opposition / obj:loses_opposition (TEMPO) -------------------------
+
+
+@pytest.mark.unit
+def test_opposition_held_by_side_to_move() -> None:
+    """``pro:opposition`` fires when the mover holds the opposition.
+
+    ``B:WK4:BK15`` (Red) — a 1-king-v-1-king equal-force ending, the only case
+    the pairing-off opposition is unambiguous. The kings' Chebyshev separation
+    is 3 (odd), so the side to move (Red) holds the opposition; every Red move
+    reaches a position whose opposition Red still holds. ``pro:opposition``
+    must appear on every Red move.
+    """
+    board = CheckersBoard.from_fen("B:WK4:BK15")
+    probes = probe_moves(board)
+    assert probes, "expected legal moves"
+    for probe in probes:
+        assert "pro:opposition" in probe.reasons, probe.pdn
+
+
+@pytest.mark.unit
+def test_opposition_not_held_by_side_to_move() -> None:
+    """``pro:opposition`` is silent when the opponent holds the opposition.
+
+    ``B:WK8:BK15`` (Red) — the kings' Chebyshev separation is 2 (even), so the
+    side NOT to move (White) holds the opposition; Red cannot seize it. No Red
+    move may carry ``pro:opposition``.
+    """
+    board = CheckersBoard.from_fen("B:WK8:BK15")
+    for probe in probe_moves(board):
+        assert "pro:opposition" not in probe.reasons, probe.pdn
+
+
+@pytest.mark.unit
+def test_opposition_silent_when_more_than_one_piece_a_side() -> None:
+    """The opposition witnesses are silent outside the 1-v-1 equal-force case.
+
+    With more than one piece per side the pairing-off method is ambiguous
+    (Pask), so neither ``pro:opposition`` nor ``obj:loses_opposition`` may
+    fire — the witness makes no claim rather than an arbitrary one.
+    ``B:W22,30:B6,9,13,14`` (Red) has many pieces a side.
+    """
+    board = CheckersBoard.from_fen("B:W22,30:B6,9,13,14")
+    for probe in probe_moves(board):
+        assert "pro:opposition" not in probe.reasons, probe.pdn
+        assert "obj:loses_opposition" not in probe.objections, probe.pdn
+
+
+# --- pro:back_rank_hold / obj:back_rank_break (STRUCTURE) -------------------
+
+
+@pytest.mark.unit
+def test_back_rank_hold_and_break() -> None:
+    """``pro:back_rank_hold`` / ``obj:back_rank_break`` on the home rank.
+
+    ``W:W29,32,18:B6`` (White) — White's home rank is row 7 (squares 29-32);
+    it starts with two men there (29 and 32). A move of the spare man
+    (``18-14``) keeps both home-rank men: ``pro:back_rank_hold`` fires. A move
+    of a home-rank man (``29-25``) drops the home-rank count from 2 to 1:
+    ``obj:back_rank_break`` fires and ``pro:back_rank_hold`` does not.
+    """
+    board = CheckersBoard.from_fen("W:W29,32,18:B6")
+    hold = _probe_for(board, "18-14")
+    assert "pro:back_rank_hold" in hold.reasons
+    assert "obj:back_rank_break" not in hold.objections
+
+    brk = _probe_for(board, "29-25")
+    assert "obj:back_rank_break" in brk.objections
+    assert "pro:back_rank_hold" not in brk.reasons
+
+
+# --- pro:center:{n} (STRUCTURE) --------------------------------------------
+
+
+@pytest.mark.unit
+def test_center_occupation_gained() -> None:
+    """``pro:center:{n}`` fires when a move increases central-square occupation.
+
+    ``B:W30:B10`` (Red) — the central squares are {14, 15, 18, 19}. The move
+    ``10-14`` puts a Red man on central square 14; Red's central count rises
+    from 0 to 1, so the move carries ``pro:center:1``.
+    """
+    board = CheckersBoard.from_fen("B:W30:B10")
+    probe = _probe_for(board, "10-14")
+    assert "pro:center:1" in probe.reasons
+
+
+@pytest.mark.unit
+def test_center_silent_when_occupation_not_increased() -> None:
+    """``pro:center`` is silent when a move does not gain a central square.
+
+    ``B:W30:B14`` (Red) — the Red man is already on central square 14; moving
+    it OFF the centre (``14-17``) does not increase central occupation, so no
+    ``pro:center`` label is emitted.
+    """
+    board = CheckersBoard.from_fen("B:W30:B14")
+    probe = _probe_for(board, "14-17")
+    assert not any(r.startswith("pro:center") for r in probe.reasons)
+
+
+# --- pro:mobility:{n} (MOBILITY) -------------------------------------------
+
+
+@pytest.mark.unit
+def test_mobility_gain_is_emitted_with_count() -> None:
+    """``pro:mobility:{n}`` carries the move's relative mobility gain.
+
+    The witness fires iff the opponent's legal-move count after the move is
+    strictly below the mover's legal-move count at the root; ``{n}`` is that
+    positive difference. Checked directly against ``board.legal_moves()``.
+    """
+    board = CheckersBoard.from_fen("B:W22,30:B6,9,13,14")
+    mover_root_moves = len(board.legal_moves())
+    move_by = {m.pdn(): m for m in board.legal_moves()}
+    for probe in probe_moves(board):
+        opponent_moves = len(board.apply(move_by[probe.pdn]).legal_moves())
+        gain = mover_root_moves - opponent_moves
+        mobility = [r for r in probe.reasons if r.startswith("pro:mobility:")]
+        if gain > 0:
+            assert mobility == [f"pro:mobility:{gain}"], probe.pdn
+        else:
+            assert mobility == [], probe.pdn
+
+
+# --- pro:formation:{kind} (STRUCTURE) --------------------------------------
+
+
+@pytest.mark.unit
+def test_formation_phalanx() -> None:
+    """``pro:formation:phalanx`` — the moved piece gains a same-rank neighbour.
+
+    ``B:W22,30:B6,9,13,14`` (Red) — the move ``6-10`` lands a Red man on
+    square 10 (row 2); Red already has a man on square 9 (row 2, the adjacent
+    dark square). The two men stand side by side on the same rank — a phalanx.
+    """
+    board = CheckersBoard.from_fen("B:W22,30:B6,9,13,14")
+    probe = _probe_for(board, "6-10")
+    assert "pro:formation:phalanx" in probe.reasons
+
+
+@pytest.mark.unit
+def test_formation_echelon() -> None:
+    """``pro:formation:echelon`` — the moved piece joins a 3-piece diagonal.
+
+    ``B:W30:B1,10,15`` (Red) — the move ``1-6`` places a Red man on square 6;
+    Red then has men on 6, 10, 15 — a run of three on one diagonal (each one
+    king-step from the next). The move carries ``pro:formation:echelon``.
+    """
+    board = CheckersBoard.from_fen("B:W30:B1,10,15")
+    probe = _probe_for(board, "1-6")
+    assert "pro:formation:echelon" in probe.reasons
+
+
+@pytest.mark.unit
+def test_formation_bridge_maintained() -> None:
+    """``pro:formation:bridge`` — a move that keeps both home-rank bridge squares.
+
+    ``W:W29,31,18:B6`` (White) — White occupies both of its home-rank bridge
+    squares (29 and 31). Moving the spare man (``18-14``) keeps the bridge
+    intact: ``pro:formation:bridge`` fires. Moving a bridge man (``29-25``)
+    breaks the bridge: no ``pro:formation:bridge``.
+    """
+    board = CheckersBoard.from_fen("W:W29,31,18:B6")
+    kept = _probe_for(board, "18-14")
+    assert "pro:formation:bridge" in kept.reasons
+
+    broken = _probe_for(board, "29-25")
+    assert "pro:formation:bridge" not in broken.reasons
+
+
+# --- obj:single_corner_drift (STRUCTURE) -----------------------------------
+
+
+@pytest.mark.unit
+def test_single_corner_drift() -> None:
+    """``obj:single_corner_drift`` — a man driven into the single corner.
+
+    ``B:W21:B3`` (Red) — Red's single-corner squares are {4, 8} (the cramped
+    true-grid-corner region near square 4). The move ``3-8`` steps a Red man
+    into the single corner: ``obj:single_corner_drift`` fires. The move
+    ``3-7`` (destination 7, not a single-corner square) does not.
+    """
+    board = CheckersBoard.from_fen("B:W21:B3")
+    drift = _probe_for(board, "3-8")
+    assert "obj:single_corner_drift" in drift.objections
+
+    no_drift = _probe_for(board, "3-7")
+    assert "obj:single_corner_drift" not in no_drift.objections
+
+
+# --- obj:exposes_man (MATERIAL, HEURISTIC) ---------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "fen,pdn",
+    [
+        ("B:W13,16:B8,9", "8-12"),
+        ("B:W14,18:B9,11", "11-15"),
+        ("B:W15,18:B9,11", "9-14"),
+    ],
+)
+def test_exposes_man_when_loss_not_proven(fen: str, pdn: str) -> None:
+    """``obj:exposes_man`` — a piece left en prise with the loss not proven.
+
+    Each curated position: a quiet move after which the opponent has a legal
+    capture (a mover piece is capturable) but the forced-capture resolver
+    proves no fact-tier shot — the mover recaptures, so the man only *looks*
+    loose. The move carries ``obj:exposes_man`` and no FACT objection.
+    """
+    board = CheckersBoard.from_fen(fen)
+    probe = _probe_for(board, pdn)
+    assert "obj:exposes_man" in probe.objections
+    # The HEURISTIC objection is only emitted when no FACT objection covers
+    # the move — the FACT objection would supersede it (design §5).
+    fact_objs = [
+        o for o in probe.objections if to_argument_evidence(o).tier is Tier.FACT
+    ]
+    assert fact_objs == [], fact_objs
+
+
+@pytest.mark.unit
+def test_exposes_man_suppressed_by_fact_objection() -> None:
+    """``obj:exposes_man`` is suppressed when a FACT objection already covers it.
+
+    ``B:W22,30:B6,9,13,14`` (Red) — the quiet move ``13-17`` lets White force a
+    proven material shot: the move carries the FACT ``obj:allows_shot:100``.
+    The FACT objection supersedes the HEURISTIC one, so ``obj:exposes_man``
+    must NOT also appear (design §5 — the tier is decided by what the resolver
+    proved).
+    """
+    board = CheckersBoard.from_fen("B:W22,30:B6,9,13,14")
+    probe = _probe_for(board, "13-17")
+    assert "obj:allows_shot:100" in probe.objections
+    assert "obj:exposes_man" not in probe.objections
+
+
+# --- differential — every emitted HEURISTIC label is HEURISTIC-tier --------
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize(
+    "fen",
+    [
+        "B:WK4:BK15",
+        "W:W29,32,18:B6",
+        "B:W30:B10",
+        "B:W22,30:B6,9,13,14",
+        "B:W13,16:B8,9",
+        "B:W30:B1,10,15",
+        "W:W29,31,18:B6",
+        "B:W21:B3",
+    ],
+    ids=lambda v: v,
+)
+def test_heuristic_witnesses_are_typed_heuristic(fen: str) -> None:
+    """Every HEURISTIC label a probe emits parses to ``Tier.HEURISTIC``.
+
+    The mirror of the FACT-tier consistency check: a HEURISTIC witness must
+    always be typed HEURISTIC by ``evidence.py`` — never silently mistyped as
+    FACT (which would let it leak into the crisp argument layer).
+    """
+    board = CheckersBoard.from_fen(fen)
+    for probe in probe_moves(board):
+        for label in _heuristic_labels(probe):
+            assert to_argument_evidence(label).tier is Tier.HEURISTIC, (
+                fen,
+                probe.pdn,
+                label,
+            )

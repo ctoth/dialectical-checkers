@@ -1,12 +1,13 @@
-"""Phase 3a — tests for ``dialectical_checkers.evidence``.
+"""Tests for ``dialectical_checkers.evidence``.
 
 ``to_argument_evidence`` is the comorphism that turns a stringly-typed witness
 label into typed :class:`ArgumentEvidence` carrying the witness's ``Value`` and
-``Tier`` (design ``notes/checkers-design.md`` §4-5). Phase 3a covers the
-FACT-tier labels of the §5 tables only — the HEURISTIC rows are Phase 5.
+``Tier`` (design ``notes/checkers-design.md`` §4-5). Phase 3a covered the
+FACT-tier labels of the §5 tables; Phase 4 adds the HEURISTIC-tier labels.
 
-Every FACT label of design §5 is asserted here to map to the correct ``Value``
-and ``Tier``, including the parsed magnitude where the label carries one.
+Every label of design §5 — FACT and HEURISTIC — is asserted here to map to the
+correct ``Value`` and ``Tier``, including the parsed magnitude where the label
+carries one.
 """
 
 from __future__ import annotations
@@ -65,6 +66,118 @@ def test_every_fact_label_is_fact_tier() -> None:
     """No FACT-tier §5 label is ever mis-typed as HEURISTIC."""
     for label, _value, _tier in FACT_LABELS:
         assert to_argument_evidence(label).tier is Tier.FACT, label
+
+
+# ---------------------------------------------------------------------------
+# unit — every HEURISTIC-tier §5 label -> correct Value / Tier (Phase 4)
+# ---------------------------------------------------------------------------
+#
+# Each row: (label, expected Value, expected Tier). All Phase-4 HEURISTIC §5
+# rows. The magnitude-carrying HEURISTIC labels (``pro:center`` /
+# ``pro:mobility``) are spot-checked for the parsed integer separately; the
+# ``pro:formation:{kind}`` named-formation suffixes are covered below.
+
+HEURISTIC_LABELS: list[tuple[str, Value, Tier]] = [
+    # AS1 pro-reasons (design §5 first table, HEURISTIC rows).
+    ("pro:opposition", Value.TEMPO, Tier.HEURISTIC),
+    ("pro:back_rank_hold", Value.STRUCTURE, Tier.HEURISTIC),
+    ("pro:center:2", Value.STRUCTURE, Tier.HEURISTIC),
+    ("pro:mobility:3", Value.MOBILITY, Tier.HEURISTIC),
+    ("pro:formation:phalanx", Value.STRUCTURE, Tier.HEURISTIC),
+    ("pro:formation:bridge", Value.STRUCTURE, Tier.HEURISTIC),
+    ("pro:formation:echelon", Value.STRUCTURE, Tier.HEURISTIC),
+    # CQ-derived objections (design §5 second table, HEURISTIC rows).
+    ("obj:loses_opposition", Value.TEMPO, Tier.HEURISTIC),
+    ("obj:back_rank_break", Value.STRUCTURE, Tier.HEURISTIC),
+    ("obj:single_corner_drift", Value.STRUCTURE, Tier.HEURISTIC),
+    ("obj:exposes_man", Value.MATERIAL, Tier.HEURISTIC),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "label,value,tier",
+    HEURISTIC_LABELS,
+    ids=[row[0] for row in HEURISTIC_LABELS],
+)
+def test_heuristic_label_maps_to_value_and_tier(
+    label: str, value: Value, tier: Tier
+) -> None:
+    """Every HEURISTIC §5 label parses to the documented Value and HEURISTIC Tier."""
+    evidence = to_argument_evidence(label)
+    assert isinstance(evidence, ArgumentEvidence)
+    assert evidence.label == label
+    assert evidence.value is value
+    assert evidence.tier is tier
+
+
+@pytest.mark.unit
+def test_every_heuristic_label_is_heuristic_tier() -> None:
+    """No HEURISTIC-tier §5 label is ever mis-typed as FACT."""
+    for label, _value, _tier in HEURISTIC_LABELS:
+        assert to_argument_evidence(label).tier is Tier.HEURISTIC, label
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "label,magnitude",
+    [
+        ("pro:center:1", 1),
+        ("pro:center:4", 4),
+        ("pro:mobility:1", 1),
+        ("pro:mobility:7", 7),
+    ],
+    ids=lambda v: str(v),
+)
+def test_heuristic_magnitude_is_parsed(label: str, magnitude: int) -> None:
+    """A HEURISTIC ``:{n}`` label parses ``n`` (a positional count) into magnitude."""
+    assert to_argument_evidence(label).magnitude == magnitude
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "label",
+    [
+        "pro:opposition",
+        "pro:back_rank_hold",
+        "pro:formation:phalanx",
+        "obj:loses_opposition",
+        "obj:back_rank_break",
+        "obj:single_corner_drift",
+        "obj:exposes_man",
+    ],
+)
+def test_magnitudeless_heuristic_labels_have_none_magnitude(label: str) -> None:
+    """A HEURISTIC label with no ``:{n}`` magnitude carries ``magnitude`` None.
+
+    ``pro:formation:{kind}`` has a non-numeric named suffix, not a magnitude —
+    its ``magnitude`` is ``None`` and the kind is kept in ``label``.
+    """
+    assert to_argument_evidence(label).magnitude is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "label",
+    [
+        "pro:formation:knight",      # not a known formation kind
+        "pro:formation:",            # empty formation kind
+        "pro:formation:Phalanx",     # wrong case
+        "pro:center",                # missing magnitude
+        "pro:mobility",              # missing magnitude
+        "pro:center:abc",            # non-numeric magnitude
+        "pro:mobility:0",            # zero magnitude
+        "pro:center:-1",             # negative magnitude
+    ],
+)
+def test_malformed_heuristic_label_raises(label: str) -> None:
+    """A malformed HEURISTIC label raises rather than being silently mistyped.
+
+    An unknown formation kind, a missing/zero/negative count magnitude — each
+    is rejected exactly as the FACT-tier malformed labels are.
+    """
+    with pytest.raises(ValueError):
+        to_argument_evidence(label)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +304,10 @@ def test_malformed_keyed_defense_raises(label: str) -> None:
         "pro:material",          # missing magnitude
         "pro:material:abc",      # non-numeric magnitude
         "obj:allows_shot",       # missing magnitude
-        "pro:opposition",        # HEURISTIC §5 row — not implemented in 3a
+        # NB: ``pro:opposition`` was a malformed-label case in Phase 3a (the
+        # HEURISTIC rows were unimplemented). Phase 4 implements the HEURISTIC
+        # §5 rows, so ``pro:opposition`` is now a *valid* HEURISTIC label — it
+        # is covered by ``HEURISTIC_LABELS`` above and no longer belongs here.
     ],
 )
 def test_unknown_or_malformed_label_raises(label: str) -> None:

@@ -6,7 +6,8 @@ carrying a ``Value``, a ``Tier`` and any parsed magnitude (design
 string prefixes; here every label is parsed once, in one place, into a closed
 taxonomy — there is no prefix dispatch scattered through the codebase.
 
-Phase 3a implements the **FACT-tier** rows of the design §5 tables only:
+Phase 3a implemented the **FACT-tier** rows of the design §5 tables; Phase 4
+adds the **HEURISTIC-tier** rows. The full §5 taxonomy this parser now knows:
 
     pro:terminal_win                  WINNING     FACT
     pro:material:{n}                  MATERIAL    FACT
@@ -18,6 +19,23 @@ Phase 3a implements the **FACT-tier** rows of the design §5 tables only:
     reply:terminal_loss               WINNING     FACT
     reply:material:{n}                MATERIAL    FACT
     defense:holds_exchange@{answered} MATERIAL    FACT
+    pro:opposition                    TEMPO       HEURISTIC
+    pro:back_rank_hold                STRUCTURE   HEURISTIC
+    pro:center:{n}                    STRUCTURE   HEURISTIC
+    pro:mobility:{n}                  MOBILITY    HEURISTIC
+    pro:formation:{kind}              STRUCTURE   HEURISTIC
+    obj:loses_opposition              TEMPO       HEURISTIC
+    obj:back_rank_break               STRUCTURE   HEURISTIC
+    obj:single_corner_drift           STRUCTURE   HEURISTIC
+    obj:exposes_man                   MATERIAL    HEURISTIC
+
+A HEURISTIC label is a positional judgement, not a resolver/terminal proof; the
+tier field is exactly the ``Bench-Capon_2003`` fact-as-highest-value bridge
+(design §4) — a FACT label outranks every HEURISTIC one. ``pro:formation`` is
+the one HEURISTIC label carrying a non-numeric tag: its ``{kind}`` is a closed
+enum (``phalanx`` / ``bridge`` / ``echelon`` — design §5 "bridge / phalanx /
+echelon") parsed into the ``magnitude``-less :class:`ArgumentEvidence` with the
+kind kept in the ``label``.
 
 A ``defense:`` label is **keyed to the specific objection / reply it answers**
 (design §6 — "a defense defeats the objection/reply it answers, and only that
@@ -30,15 +48,18 @@ un-keyed ``defense:holds_exchange`` is still accepted by this parser (it is a
 valid evidence type) but ``witnesses.py`` never emits it — every emitted
 defense carries its target.
 
-The HEURISTIC §5 rows (``pro:opposition``, ``obj:back_rank_break``, …) are
-Phase 5 — this module rejects them rather than silently mistyping them.
-
-A ``:{n}`` magnitude is the resolver's native **weighted material** unit
+A FACT ``:{n}`` magnitude is the resolver's native **weighted material** unit
 (man = 100, king = 150) — the same unit ``captures.ShotResult.material_net``
 and ``ResolvedLine.material_swing`` report. ``reply:`` and ``defense:`` are
 emitted by ``witnesses.py`` only when the resolver *proved* the line, so they
 are FACT here; their HEURISTIC forms (a truncated resolver line) are simply
 never produced and therefore never reach this parser.
+
+A HEURISTIC ``:{n}`` magnitude is **not** a material unit: ``pro:center:{n}``
+counts central-square occupation and ``pro:mobility:{n}`` counts a legal-move
+gain. The magnitude is still a strictly positive base-10 integer, parsed into
+the same ``magnitude`` field; its interpretation is the witness's own (a count,
+not material). ``witnesses.py`` documents the exact count per HEURISTIC label.
 
 This module imports only from within ``dialectical_checkers`` and the stdlib.
 """
@@ -70,28 +91,51 @@ class ArgumentEvidence:
     answered: str | None = None
 
 
-# --- the FACT-tier label taxonomy (design §5) -------------------------------
+# --- the §5 label taxonomy (FACT + HEURISTIC) -------------------------------
 #
-# Two tables. ``_FIXED`` — labels with no magnitude, mapped directly to their
+# Three tables. ``_FIXED`` — labels with no magnitude, mapped directly to their
 # (Value, Tier). ``_MAGNITUDE`` — label prefixes that MUST carry a ``:{n}``
-# integer magnitude, mapped to their (Value, Tier). Splitting them keeps the
-# parser a pair of dict lookups with no per-label branching.
+# integer magnitude, mapped to their (Value, Tier). ``_FORMATION_KINDS`` — the
+# closed enum of ``pro:formation:{kind}`` suffixes (the one HEURISTIC label
+# carrying a non-numeric tag). Splitting them keeps the parser dict lookups
+# with no per-label branching.
 
 _FIXED: dict[str, tuple[Value, Tier]] = {
+    # FACT-tier (design §5, Phase 3a).
     "pro:terminal_win": (Value.WINNING, Tier.FACT),
     "pro:crown": (Value.KING_COUNT, Tier.FACT),
     "obj:terminal_loss": (Value.WINNING, Tier.FACT),
     "reply:terminal_loss": (Value.WINNING, Tier.FACT),
     "defense:holds_exchange": (Value.MATERIAL, Tier.FACT),
+    # HEURISTIC-tier (design §5, Phase 4) — fixed, no magnitude.
+    "pro:opposition": (Value.TEMPO, Tier.HEURISTIC),
+    "pro:back_rank_hold": (Value.STRUCTURE, Tier.HEURISTIC),
+    "obj:loses_opposition": (Value.TEMPO, Tier.HEURISTIC),
+    "obj:back_rank_break": (Value.STRUCTURE, Tier.HEURISTIC),
+    "obj:single_corner_drift": (Value.STRUCTURE, Tier.HEURISTIC),
+    "obj:exposes_man": (Value.MATERIAL, Tier.HEURISTIC),
 }
 
 _MAGNITUDE: dict[str, tuple[Value, Tier]] = {
+    # FACT-tier (design §5, Phase 3a) — magnitude is weighted material.
     "pro:material": (Value.MATERIAL, Tier.FACT),
     "pro:shot_setup": (Value.MATERIAL, Tier.FACT),
     "obj:allows_shot": (Value.MATERIAL, Tier.FACT),
     "obj:loses_exchange": (Value.MATERIAL, Tier.FACT),
     "reply:material": (Value.MATERIAL, Tier.FACT),
+    # HEURISTIC-tier (design §5, Phase 4) — magnitude is a positional COUNT,
+    # not material (``pro:center`` central-square occupation gained,
+    # ``pro:mobility`` legal-move-count gained).
+    "pro:center": (Value.STRUCTURE, Tier.HEURISTIC),
+    "pro:mobility": (Value.MOBILITY, Tier.HEURISTIC),
 }
+
+# ``pro:formation:{kind}`` — the closed set of named formations (design §5
+# "bridge / phalanx / echelon"). The kind is a non-numeric suffix; a label
+# whose suffix is not one of these is rejected, never silently mistyped.
+_FORMATION_PREFIX = "pro:formation"
+_FORMATION_KINDS: frozenset[str] = frozenset({"phalanx", "bridge", "echelon"})
+_FORMATION_TYPING: tuple[Value, Tier] = (Value.STRUCTURE, Tier.HEURISTIC)
 
 
 # --- keyed defense labels (design §6) ---------------------------------------
@@ -113,12 +157,15 @@ def to_argument_evidence(label: str) -> ArgumentEvidence:
     the prefix is looked up and ``<n>`` parsed into ``magnitude``. A keyed
     defense label has the form ``<defense-type>@<answered>`` where
     ``<answered>`` is itself a valid objection / reply label; the parsed
-    ``answered`` field carries that target (design §6 "and only that one").
+    ``answered`` field carries that target (design §6 "and only that one"). A
+    ``pro:formation:{kind}`` label has a named-formation suffix from the closed
+    ``_FORMATION_KINDS`` enum — not a magnitude.
 
-    Raises :class:`ValueError` for an empty, malformed, or unknown label, or
-    for a magnitude label whose ``:{n}`` part is missing or non-numeric —
-    Phase 3a never silently mistypes a label, and the HEURISTIC §5 rows
-    (Phase 5) are unknown to this parser and so are rejected.
+    Both FACT and HEURISTIC §5 rows are recognised (Phase 4 added the
+    HEURISTIC rows). Raises :class:`ValueError` for an empty, malformed, or
+    unknown label, for a magnitude label whose ``:{n}`` part is missing or
+    non-numeric, or for a ``pro:formation`` label with an unknown kind — a
+    label is never silently mistyped.
     """
     if not label:
         raise ValueError("empty witness label")
@@ -157,6 +204,19 @@ def to_argument_evidence(label: str) -> ArgumentEvidence:
     head, sep, tail = label.rpartition(":")
     if not sep:
         raise ValueError(f"unknown witness label {label!r}")
+
+    # ``pro:formation:{kind}`` — a HEURISTIC label whose tail is a named
+    # formation kind, not a magnitude. The kind must be in the closed
+    # ``_FORMATION_KINDS`` enum; an unknown kind is rejected, never mistyped.
+    if head == _FORMATION_PREFIX:
+        if tail not in _FORMATION_KINDS:
+            raise ValueError(
+                f"witness label {label!r} has an unknown formation kind "
+                f"{tail!r} (known: {sorted(_FORMATION_KINDS)})"
+            )
+        value, tier = _FORMATION_TYPING
+        return ArgumentEvidence(label=label, value=value, tier=tier)
+
     mag = _MAGNITUDE.get(head)
     if mag is None:
         raise ValueError(f"unknown witness label {label!r}")
