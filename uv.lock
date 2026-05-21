@@ -31,7 +31,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "doxa", editable = "../doxa" },
+    { name = "doxa", git = "https://github.com/ctoth/doxa.git?rev=f076502184990a42f1531d3d7a27a5bcf606074c" },
     { name = "formal-argumentation", git = "https://github.com/ctoth/argumentation.git?rev=d47c87003afdce450bfeff10f242309c510f1690" },
 ]
 
@@ -47,17 +47,7 @@ dev = [
 [[package]]
 name = "doxa"
 version = "0.1.0"
-source = { editable = "../doxa" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "hypothesis", specifier = ">=6.0" },
-    { name = "pyright", specifier = ">=1.1.390" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-timeout", specifier = ">=2.3" },
-]
+source = { git = "https://github.com/ctoth/doxa.git?rev=f076502184990a42f1531d3d7a27a5bcf606074c#f076502184990a42f1531d3d7a27a5bcf606074c" }
 
 [[package]]
 name = "formal-argumentation"

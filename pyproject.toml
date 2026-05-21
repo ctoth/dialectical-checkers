@@ -31,15 +31,8 @@ classifiers = [
 ]
 dependencies = [
     "formal-argumentation @ git+https://github.com/ctoth/argumentation.git@d47c87003afdce450bfeff10f242309c510f1690",
-    "doxa",
+    "doxa @ git+https://github.com/ctoth/doxa.git@f076502184990a42f1531d3d7a27a5bcf606074c",
 ]
-
-# doxa is depended on as a uv PATH dependency (design v1.5 / notes
-# checkers-v1.5-design.md "Dependency"): the local ../doxa checkout is ahead of
-# origin/master and the unpushed commits ARE the doxa.argumentation module a
-# git pin would resolve without. Switch to a git pin once those commits land.
-[tool.uv.sources]
-doxa = { path = "C:/Users/Q/code/doxa", editable = true }
 
 [project.urls]
 Homepage = "https://github.com/ctoth/dialectical-checkers"
