@@ -82,12 +82,12 @@ cd dialectical-checkers
 uv sync
 ```
 
-> **Note on dependencies.** The engine depends on two sibling research
-> libraries: [`formal-argumentation`](https://github.com/ctoth/argumentation)
-> (a pinned git dependency, fetched automatically) and `doxa` (currently a
-> **local path dependency** — `pyproject.toml` expects a `doxa` checkout at
-> `../doxa`). Without that local checkout `uv sync` cannot resolve `doxa`. This
-> is a known interim state; see the comment in `pyproject.toml`.
+> **Dependencies.** The engine depends on two sibling research libraries —
+> [`formal-argumentation`](https://github.com/ctoth/argumentation) and
+> [`doxa`](https://github.com/ctoth/doxa), the Jøsang-opinion argumentation
+> layer behind the v1.5 graded layer. Both are public repositories pinned to a
+> specific commit in `pyproject.toml` and fetched automatically by `uv sync` —
+> no manual checkout is required.
 
 ## Usage
 
