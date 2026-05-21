@@ -295,20 +295,26 @@ def test_empty_probes_yields_empty_graph() -> None:
 
 
 @pytest.mark.unit
-def test_ranking_carries_the_graded_categoriser_layer() -> None:
-    """Phase 5 fills the ``ranking`` field with the graded Categoriser layer.
+def test_ranking_carries_the_opinion_valued_graded_layer() -> None:
+    """v1.5 fills the ``ranking`` field with the opinion-valued graded layer.
 
-    Phase 3b left ``ranking`` empty as a seam; Phase 5 (design §7) builds the
-    graded layer into it. For a single clean probe — a move with no HEURISTIC
-    objection — the graded AF has the one ``move:`` node, no defeats, and the
-    move's Categoriser score is the unattacked-argument default of ``1.0``.
+    Phase 3b left ``ranking`` empty as a seam; v1.5 (design V1.5-D1..D7) builds
+    a ``doxa.BipolarOpinionGraph`` into it. For a single witnessless probe —
+    a move with no HEURISTIC witness — the graded graph has the one ``move:``
+    node, no support / attack edges, and the move's resolved opinion is the
+    vacuous opinion at its base rate, so its strength is exactly that base rate
+    (``expectation() == a``; with no board ``a`` is the neutral ``0.5``).
     """
     graph = build_root_argument_graph([MoveProbe(pdn="11-15")])
     assert graph.ranking != {}
-    assert graph.ranking["move_scores"] == {"11-15": 1.0}
+    assert graph.ranking["move_scores"] == {"11-15": pytest.approx(0.5)}
     assert graph.ranking["arguments"] == frozenset({"move:11-15"})
-    assert graph.ranking["defeats"] == frozenset()
-    assert graph.ranking["converged"] is True
+    assert graph.ranking["supports"] == frozenset()
+    assert graph.ranking["attacks"] == frozenset()
+    # The move's resolved opinion is vacuous at the neutral base rate.
+    opinion = graph.ranking["move_opinions"]["11-15"]
+    assert opinion.u == pytest.approx(1.0)
+    assert opinion.expectation() == pytest.approx(0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -399,38 +405,50 @@ def test_graph_defeats_are_over_declared_arguments() -> None:
 
 
 # ---------------------------------------------------------------------------
-# unit — the graded Categoriser layer (design §7, Phase 5)
+# unit — the opinion-valued graded layer (design v1.5, V1.5-D1..D7)
 # ---------------------------------------------------------------------------
 #
-# ``build_graded_layer`` builds a SECOND plain Dung AF over the crisp survivors
-# — nodes = surviving ``move:`` + their HEURISTIC ``obj:`` nodes, edges
-# heuristic ``obj -> move`` — and runs ``categoriser_scores`` on it. These
-# tests drive it directly over hand-built probes so the graded semantics are
-# tested in isolation.
+# ``build_graded_layer`` builds a ``doxa.BipolarOpinionGraph`` over the crisp
+# survivors — ``move:`` nodes (vacuous ``intrinsic``, base rate the synthesized
+# prior) plus one leaf node per HEURISTIC witness (non-vacuous ``intrinsic``),
+# ``supports`` / ``attacks`` edges — and resolves it with ``doxa.evaluate`` to a
+# per-move Jøsang ``Opinion``. These tests drive it directly over hand-built
+# probes so the opinion-valued graded semantics are tested in isolation.
 
 
 @pytest.mark.unit
-def test_graded_layer_clean_move_scores_one() -> None:
-    """A surviving move with no HEURISTIC objection scores the Cat default 1.0.
+def test_graded_layer_clean_move_resolves_above_neutral() -> None:
+    """A surviving move with a HEURISTIC pro and no objection resolves above 0.5.
 
-    An unattacked argument's Categoriser score is 1.0 (Bonzon 2016 Def. 9). A
-    clean move's ``move:`` node has no attacker in the graded AF, so its
-    per-move Categoriser score is 1.0.
+    The move node is vacuous (base rate 0.5 with no board); its one HEURISTIC
+    pro-reason is a support leaf carrying a positive-belief ``Opinion``. Through
+    ``doxa.evaluate`` the move's resolved opinion accrues that supporter, so its
+    ``expectation()`` strength rises strictly above the neutral 0.5 a witnessless
+    move would resolve to (design V1.5-D1 — support is first-class).
     """
     graph = build_root_argument_graph(
         [MoveProbe(pdn="11-15", reasons=("pro:opposition",))]
     )
-    assert graph.ranking["move_scores"]["11-15"] == 1.0
+    score = graph.ranking["move_scores"]["11-15"]
+    assert score > 0.5
+    # The graded graph has the move node + one support leaf, one support edge.
+    assert graph.ranking["arguments"] == frozenset(
+        {"move:11-15", "wit:11-15:pro:opposition"}
+    )
+    assert graph.ranking["supports"] == frozenset(
+        {("wit:11-15:pro:opposition", "move:11-15")}
+    )
+    assert graph.ranking["attacks"] == frozenset()
 
 
 @pytest.mark.unit
-def test_graded_layer_heuristic_objection_lowers_score() -> None:
-    """A HEURISTIC objection adds a graded-AF defeat and lowers the Cat score.
+def test_graded_layer_heuristic_objection_lowers_strength() -> None:
+    """A HEURISTIC objection is an attack edge that lowers the move's strength.
 
-    A move carrying one HEURISTIC objection has an ``obj:`` node defeating its
-    ``move:`` node in the graded AF; ``Cat(move) = 1/(1 + Cat(obj)) = 1/2``. A
-    clean sibling stays at 1.0 — so the graded layer ranks the clean move above
-    the objected one.
+    A move carrying one HEURISTIC objection has a ``wit:`` leaf joined to its
+    ``move:`` node by an ``attacks`` edge; ``doxa.evaluate`` negates the
+    discounted attacker and accrues it under CCF, so the move's resolved
+    ``expectation()`` strength drops below a clean sibling's (design V1.5-D1).
     """
     objected = MoveProbe(
         pdn="9-14",
@@ -439,22 +457,22 @@ def test_graded_layer_heuristic_objection_lowers_score() -> None:
     )
     clean = MoveProbe(pdn="10-15", reasons=("pro:opposition",))
     graph = build_root_argument_graph([objected, clean])
-    assert graph.ranking["move_scores"]["9-14"] == pytest.approx(0.5)
-    assert graph.ranking["move_scores"]["10-15"] == 1.0
-    # The graded AF carries exactly the one heuristic obj -> move defeat.
-    assert graph.ranking["defeats"] == frozenset(
-        {("obj:9-14:obj:loses_opposition", "move:9-14")}
+    scores = graph.ranking["move_scores"]
+    assert scores["9-14"] < scores["10-15"]
+    # The graded graph carries exactly the one heuristic attack edge.
+    assert graph.ranking["attacks"] == frozenset(
+        {("wit:9-14:obj:loses_opposition", "move:9-14")}
     )
 
 
 @pytest.mark.unit
-def test_graded_layer_more_objections_lower_score_monotonically() -> None:
-    """More independent HEURISTIC objections lower the Cat score (Cardinality).
+def test_graded_layer_more_objections_lower_strength_monotonically() -> None:
+    """More independent HEURISTIC objections lower the move's strength.
 
-    ``Bonzon_2016`` proves the Categoriser satisfies Cardinality Precedence: N
-    independent objections lower the score monotonically, with no copy-counting
-    (design §7). Two heuristic objections score the move below one, one below
-    none.
+    Two heuristic objections accrue (negated) under doxa's CCF operator and
+    pull the move's resolved ``expectation()`` strength below a move with one
+    objection, which is below a clean move — a monotone ordering, no
+    copy-counting (the witness ids embed the move PDN, every node distinct).
     """
     none = MoveProbe(pdn="10-15", reasons=("pro:opposition",))
     one = MoveProbe(
@@ -474,15 +492,15 @@ def test_graded_layer_more_objections_lower_score_monotonically() -> None:
 
 @pytest.mark.unit
 def test_graded_layer_excludes_fact_objections() -> None:
-    """Only HEURISTIC objections enter the graded AF — FACT ones do not.
+    """Only HEURISTIC witnesses enter the graded graph — FACT ones do not.
 
-    A FACT objection lives in the crisp layer (design §6); the graded layer
-    (design §7) is built only from the HEURISTIC ``obj:`` nodes. A move
-    carrying a FACT objection but no HEURISTIC one therefore has no graded-AF
-    defeat — but note a move with an undefeated FACT objection is also
-    crisply eliminated, so the case is tested in the empty-survivor fallback
-    below. Here the move's FACT objection is defeated by a keyed FACT defense
-    so the move survives, and the graded AF still carries no defeat for it.
+    A FACT objection / reply lives in the crisp layer (design V1.5-D6); the
+    opinion-valued graded layer is built only from HEURISTIC witnesses. A move
+    whose only witnesses are FACT therefore has no support / attack edge in the
+    graded graph — its ``move:`` node is a witnessless leaf. Here the move's
+    FACT reply is defeated by a keyed FACT defense so the move survives, and the
+    graded graph still carries no edge for it; its resolved opinion is vacuous,
+    so its strength is exactly its (neutral, board-free) base rate.
     """
     probe = MoveProbe(
         pdn="2x11",
@@ -493,19 +511,95 @@ def test_graded_layer_excludes_fact_objections() -> None:
     graph = build_root_argument_graph([probe])
     # The move survived the crisp layer.
     assert "2x11" in graph.survivors
-    # ...and the graded AF carries no defeat — the FACT reply did not enter it.
-    assert graph.ranking["defeats"] == frozenset()
-    assert graph.ranking["move_scores"]["2x11"] == 1.0
+    # ...and the graded graph carries no edge — no FACT witness entered it.
+    assert graph.ranking["supports"] == frozenset()
+    assert graph.ranking["attacks"] == frozenset()
+    assert graph.ranking["arguments"] == frozenset({"move:2x11"})
+    # A witnessless move resolves vacuous: expectation() == its base rate.
+    assert graph.ranking["move_scores"]["2x11"] == pytest.approx(0.5)
+    assert graph.ranking["move_opinions"]["2x11"].u == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_graded_layer_witnessless_move_resolves_to_base_rate() -> None:
+    """A move with no HEURISTIC witness resolves to ``expectation() == a`` (D4).
+
+    The move node carries a vacuous ``intrinsic`` opinion; with no support /
+    attack edge it stays vacuous through ``doxa.evaluate``, so its resolved
+    ``expectation()`` is exactly its base rate ``a`` — the neutral 0.5 when
+    ``build_root_argument_graph`` is called with no board (design V1.5-D4).
+    """
+    graph = build_root_argument_graph([MoveProbe(pdn="11-15")])
+    opinion = graph.ranking["move_opinions"]["11-15"]
+    assert opinion.u == pytest.approx(1.0)  # vacuous
+    assert opinion.expectation() == pytest.approx(opinion.a)
+    assert graph.ranking["move_scores"]["11-15"] == pytest.approx(0.5)
+
+
+@pytest.mark.unit
+def test_graded_layer_contested_move_resolves_to_high_uncertainty() -> None:
+    """A contested move (strong pro AND strong obj) resolves to HIGH ``u``.
+
+    The decisive reason for the opinion-valued layer (design V1.5-D1): CCF
+    accrual is the only operator where balanced disagreement raises uncertainty
+    ``u``. A move carrying a strong HEURISTIC pro (``pro:center:5``) AND a strong
+    HEURISTIC objection (``obj:exposes_man``) must resolve to a markedly higher
+    ``u`` than a bland move with a single weak pro — proving the uncertainty
+    channel is genuinely live. A scalar (attack-only Categoriser) layer would
+    collapse the contested move onto an indistinguishable mid score.
+    """
+    contested = MoveProbe(
+        pdn="9-14",
+        reasons=("pro:center:5",),
+        objections=("obj:exposes_man",),
+    )
+    bland = MoveProbe(pdn="10-15", reasons=("pro:center:1",))
+    graph = build_root_argument_graph([contested, bland])
+    contested_op = graph.ranking["move_opinions"]["9-14"]
+    bland_op = graph.ranking["move_opinions"]["10-15"]
+    # The contested move's uncertainty is markedly higher than the bland move's
+    # — the disagreement was converted to ``u``, not collapsed to a scalar.
+    assert contested_op.u > bland_op.u + 0.10
+    assert contested_op.u > 0.40, contested_op
+    # ...yet both stay well inside the valid opinion simplex.
+    assert contested_op.b + contested_op.d + contested_op.u == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_graded_layer_support_heavy_move_outranks_support_poor() -> None:
+    """A support-heavy move outranks a support-poor one the old layer tied.
+
+    The attack-only Phase-5 Categoriser scored BOTH a move with one HEURISTIC
+    pro and a move with three HEURISTIC pros at the unattacked default 1.0 —
+    support never reached the graph, so the two tied. The v1.5 opinion-valued
+    layer makes HEURISTIC support first-class (design V1.5-D7): the
+    support-heavy move accrues strictly more belief and resolves to a strictly
+    higher ``expectation()`` strength.
+    """
+    heavy = MoveProbe(
+        pdn="11-16",
+        reasons=("pro:center:4", "pro:mobility:3", "pro:back_rank_hold"),
+    )
+    poor = MoveProbe(pdn="10-15", reasons=("pro:center:1",))
+    graph = build_root_argument_graph([heavy, poor])
+    scores = graph.ranking["move_scores"]
+    # The old attack-only Categoriser tied these at 1.0; v1.5 ranks heavy first.
+    assert scores["11-16"] > scores["10-15"]
+    # The support-heavy move accrues belief: its opinion is less uncertain.
+    assert (
+        graph.ranking["move_opinions"]["11-16"].u
+        < graph.ranking["move_opinions"]["10-15"].u
+    )
 
 
 @pytest.mark.unit
 def test_graded_layer_only_ranks_crisp_survivors() -> None:
-    """The graded AF's ``move:`` nodes are exactly the crisp survivors.
+    """The graded graph's ``move:`` nodes are exactly the crisp survivors.
 
     A move crisply eliminated by an undefeated FACT objection is NOT a node in
-    the graded AF — the graded layer can never resurrect it (design §7). Here
-    one move is clean (survives) and one carries an undefeated FACT objection
-    (eliminated): only the survivor appears in the graded layer.
+    the graded graph — the graded layer can never resurrect it (design V1.5-D6).
+    Here one move is clean (survives) and one carries an undefeated FACT
+    objection (eliminated): only the survivor appears in the graded layer.
     """
     survivor = MoveProbe(pdn="11-15", reasons=("pro:material:100",))
     eliminated = MoveProbe(
@@ -514,7 +608,7 @@ def test_graded_layer_only_ranks_crisp_survivors() -> None:
     graph = build_root_argument_graph([survivor, eliminated])
     # The crisp layer eliminated 9-14 and kept 11-15.
     assert graph.survivors == frozenset({"11-15"})
-    # The graded AF has only the survivor's move: node — 9-14 is absent.
+    # The graded graph has only the survivor's move: node — 9-14 is absent.
     assert graph.ranking["arguments"] == frozenset({"move:11-15"})
     assert set(graph.ranking["move_scores"]) == {"11-15"}
 

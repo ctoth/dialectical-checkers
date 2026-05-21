@@ -78,7 +78,7 @@ class DialecticalCheckersEngine:
         yields a null :class:`EngineDecision` — the game is over.
         """
         probes = tuple(probe_moves(board))
-        graph = build_root_argument_graph(list(probes))
+        graph = build_root_argument_graph(list(probes), board=board)
         selected = (
             choose_move(
                 list(probes),

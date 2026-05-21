@@ -16,6 +16,7 @@ name = "dialectical-checkers"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "doxa" },
     { name = "formal-argumentation" },
 ]
 
@@ -29,12 +30,30 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "formal-argumentation", git = "https://github.com/ctoth/argumentation.git?rev=d47c87003afdce450bfeff10f242309c510f1690" }]
+requires-dist = [
+    { name = "doxa", editable = "../doxa" },
+    { name = "formal-argumentation", git = "https://github.com/ctoth/argumentation.git?rev=d47c87003afdce450bfeff10f242309c510f1690" },
+]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "hypothesis", specifier = ">=6.0" },
     { name = "pydraughts", specifier = ">=0.6.7" },
+    { name = "pyright", specifier = ">=1.1.390" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-timeout", specifier = ">=2.3" },
+]
+
+[[package]]
+name = "doxa"
+version = "0.1.0"
+source = { editable = "../doxa" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "hypothesis", specifier = ">=6.0" },
     { name = "pyright", specifier = ">=1.1.390" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-timeout", specifier = ">=2.3" },

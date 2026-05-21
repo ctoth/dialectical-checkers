@@ -31,8 +31,8 @@ from dialectical_checkers.arguments import (
 from dialectical_checkers.selection import (
     SELECTOR_MODES,
     _accepted_heuristic_pro_count,
-    _categoriser_score,
     _fact_pro_priority,
+    _graded_strength,
     _selection_key,
     _worst_fact_objection_magnitude,
     choose_move,
@@ -248,25 +248,32 @@ def test_net_material_demotes_large_capture_with_big_giveback() -> None:
 
 
 # ---------------------------------------------------------------------------
-# term 3 — graded Categoriser score (design §7, Phase 5)
+# term 3 — opinion-valued graded strength (design V1.5-D7)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_term3_categoriser_score_clean_move_is_one() -> None:
-    """A surviving move with no HEURISTIC objection has Categoriser score 1.0."""
+def test_term3_graded_strength_clean_move_is_above_neutral() -> None:
+    """A surviving move with a HEURISTIC pro resolves above the neutral 0.5.
+
+    Term 3 reads the move's opinion-valued graded strength
+    (``Opinion.expectation()``). A move with a HEURISTIC pro-reason and no
+    objection accrues that supporter, so its strength rises strictly above the
+    neutral 0.5 a witnessless / board-free move would resolve to.
+    """
     probe = MoveProbe(pdn="11-15", reasons=("pro:opposition",))
     graph = build_root_argument_graph([probe])
-    assert _categoriser_score(probe, graph) == 1.0
+    assert _graded_strength(probe, graph) > 0.5
 
 
 @pytest.mark.unit
-def test_term3_categoriser_score_drops_under_heuristic_objection() -> None:
-    """A HEURISTIC objection drops the move's term-3 Categoriser score below 1.
+def test_term3_graded_strength_drops_under_heuristic_objection() -> None:
+    """A HEURISTIC objection drops the move's term-3 graded strength.
 
     Two clean-FACT survivors (both term 1 = 0, no FACT pro): one carries a
-    HEURISTIC objection, one does not. The graded term 3 ranks the clean move
-    first — and ``choose_move`` in the default ``argument`` mode picks it. The
+    HEURISTIC objection, one does not. The objected move's opinion-valued
+    strength is strictly lower, so graded term 3 ranks the clean move first —
+    and ``choose_move`` in the default ``argument`` mode picks it. The
     pre-Phase-5 selector (FACT terms only) would have tied them and fallen to
     the PDN tiebreak, picking ``10-15`` only by string order — this test pins
     that the graded layer, not the tiebreak, makes the choice.
@@ -278,8 +285,7 @@ def test_term3_categoriser_score_drops_under_heuristic_objection() -> None:
     )
     clean = MoveProbe(pdn="11-16", reasons=("pro:opposition",))
     graph = build_root_argument_graph([objected, clean])
-    assert _categoriser_score(objected, graph) == pytest.approx(0.5)
-    assert _categoriser_score(clean, graph) == 1.0
+    assert _graded_strength(objected, graph) < _graded_strength(clean, graph)
     # Graded term 3 ranks the clean move first under the full key.
     assert _selection_key(clean, graph, None) < _selection_key(
         objected, graph, None
@@ -289,13 +295,14 @@ def test_term3_categoriser_score_drops_under_heuristic_objection() -> None:
 
 @pytest.mark.unit
 def test_term3_comes_after_fact_terms() -> None:
-    """A FACT pro always outranks a better Categoriser score (term 2 > term 3).
+    """A FACT pro always outranks a better graded strength (term 2 > term 3).
 
     ``fact_move`` carries a FACT ``pro:material:100`` but also a HEURISTIC
-    objection (Cat 0.5); ``graded_move`` is clean (Cat 1.0) but has no FACT
-    pro. The FACT pro-value term (2) dominates the graded Categoriser term (3),
-    so the selector picks the FACT move despite its lower Categoriser score —
-    a FACT decision is never overridden by a graded one (design §7).
+    objection (lower graded strength); ``graded_move`` is heuristically clean
+    (higher graded strength) but has no FACT pro. The FACT pro-value term (2)
+    dominates the graded strength term (3), so the selector picks the FACT move
+    despite its lower graded strength — a FACT decision is never overridden by
+    a graded one (design V1.5-D6).
     """
     fact_move = MoveProbe(
         pdn="2-6",
@@ -304,9 +311,11 @@ def test_term3_comes_after_fact_terms() -> None:
     )
     graded_move = MoveProbe(pdn="3-7", reasons=("pro:opposition",))
     graph = build_root_argument_graph([fact_move, graded_move])
-    assert _categoriser_score(fact_move, graph) == pytest.approx(0.5)
-    assert _categoriser_score(graded_move, graph) == 1.0
-    # The FACT pro term decides: ``2-6`` wins despite the worse Cat score.
+    # The graded layer rates the clean move higher than the FACT move...
+    assert _graded_strength(graded_move, graph) > _graded_strength(
+        fact_move, graph
+    )
+    # ...but the FACT pro term decides: ``2-6`` wins despite the lower strength.
     assert choose_move([fact_move, graded_move], graph).pdn == "2-6"
 
 
@@ -331,19 +340,26 @@ def test_term4_counts_heuristic_pros_not_fact_pros() -> None:
 
 
 @pytest.mark.unit
-def test_term4_breaks_a_categoriser_tie() -> None:
+def test_term4_breaks_a_graded_strength_tie() -> None:
     """Term 4 ranks more accepted heuristic pros first when term 3 ties.
 
-    Two clean survivors, neither with a HEURISTIC objection — so both have
-    Categoriser score 1.0 and term 3 ties. ``rich`` carries two HEURISTIC
-    pro-reasons, ``thin`` carries one; term 4 ranks ``rich`` first.
+    Two clean survivors, neither with a HEURISTIC objection. ``rich`` carries
+    two no-magnitude HEURISTIC pros, ``thin`` carries one — and because the two
+    no-magnitude witnesses carry an identical intrinsic ``Opinion``, doxa's CCF
+    accrual is idempotent on them, so ``rich`` and ``thin`` resolve to an equal
+    opinion-valued graded strength (term 3 ties). Term 4, the value-weighted
+    accepted-heuristic-pro count, then breaks the tie in ``rich``'s favour —
+    exactly the redundant-but-retained role design V1.5-D7 documents.
     """
     rich = MoveProbe(
         pdn="11-16", reasons=("pro:opposition", "pro:back_rank_hold")
     )
     thin = MoveProbe(pdn="10-15", reasons=("pro:opposition",))
     graph = build_root_argument_graph([rich, thin])
-    assert _categoriser_score(rich, graph) == _categoriser_score(thin, graph)
+    # The two no-magnitude pros accrue idempotently — term 3 genuinely ties.
+    assert _graded_strength(rich, graph) == pytest.approx(
+        _graded_strength(thin, graph)
+    )
     assert _accepted_heuristic_pro_count(rich) == 2
     assert _accepted_heuristic_pro_count(thin) == 1
     assert _selection_key(rich, graph, None) < _selection_key(

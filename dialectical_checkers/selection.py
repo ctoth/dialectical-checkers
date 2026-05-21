@@ -21,20 +21,29 @@ last:
    The material component is the **net** material the move keeps — its
    immediate FACT capture minus any defended reply that recaptures part of it
    — so a defended even exchange scores 0 material, below a clean gain.
-3. **maximise the move's Categoriser score** ``Cat(move:A)`` — the graded
-   Categoriser layer (``arguments.build_graded_layer``, design §7). High when
-   the move has few / weak HEURISTIC objections. Read from
-   ``graph.ranking["move_scores"]``.
+3. **maximise the move's opinion-valued graded strength** —
+   ``result[move].expectation()`` from the v1.5 opinion-valued graded layer
+   (``arguments.build_graded_layer``, design V1.5-D7). High when the move's
+   HEURISTIC supporters outweigh its HEURISTIC objections under doxa's CCF
+   accrual. Read from ``graph.ranking["move_scores"]``. This REPLACES the
+   attack-only Phase-5 Categoriser score.
 4. **maximise the value-weighted count of the move's accepted HEURISTIC
-   pro-reasons** — the design §7 v1 support proxy. HEURISTIC pro-reasons cannot
-   enter a Dung AF (it has only attacks), so v1 counts them as a selector-key
-   term, value-weighted by the AS2 value each pro promotes.
+   pro-reasons** — the original Phase-5 v1 support proxy. With the v1.5
+   opinion-valued layer this term is **redundant in ``argument`` mode**:
+   heuristic support is now first-class in the term-3 opinion strength (design
+   V1.5-D7), and a term-3 tie under opinion semantics implies an identical
+   HEURISTIC-witness profile, hence an identical term-4 count. It is retained
+   because the ``support`` differential-testing selector mode (part of the
+   frozen multi-mode ``choose_move`` surface) is *defined by* it; removing it
+   would require redefining that mode, outside the v1.5 scope. See
+   :func:`_accepted_heuristic_pro_count`.
 5. **deterministic tiebreak**: the static evaluation (``search.py``) of the
    position the move reaches, then the move's PDN string.
 
 The graded terms 3-4 come strictly **after** the FACT terms 1-2: a FACT
 decision always dominates a graded one, so the graded layer can never override
-a position the FACT terms already decide (design §7 — fact-as-highest-value).
+a position the FACT terms already decide (design V1.5-D6 — fact-as-highest-
+value).
 
 The §7 multi-mode ``selector_mode`` surface (``argument`` default, plus
 ``categoriser`` / ``score`` / ``grounded`` / ``support`` / ``optimizer``)
@@ -234,32 +243,44 @@ def _fact_pro_priority(probe: MoveProbe) -> tuple[int, int, int, int]:
     return (winning, large_material, crown, small_material)
 
 
-# --- graded Categoriser score (selector key term 3) -------------------------
+# --- graded opinion strength (selector key term 3) --------------------------
 #
-# Design §7 term 3: maximise Cat(move:A), the move's Categoriser score from the
-# graded layer (``arguments.build_graded_layer``). High when the move has few /
-# weak HEURISTIC objections. The score is a float in (0, 1]; the lexicographic
-# key is consumed by ``min`` over ints/strings, so the score is mapped to a
-# negated integer at a fixed scale (more Cat -> smaller key). The scale
-# ``_CAT_SCALE`` is large enough that the Categoriser fixpoint's float
-# resolution is preserved as an int ordering.
+# Design V1.5-D7 term 3: maximise the move's opinion-valued graded strength —
+# ``result[move].expectation()`` from the v1.5 opinion-valued graded layer
+# (``arguments.build_graded_layer``, design V1.5-D1..D7). This REPLACES the
+# attack-only Categoriser score of Phase 5: the strength is now an honest
+# accrual of the move's HEURISTIC supporters AND objections under doxa's CCF
+# operator — first-class support, not an attack-only proxy.
+#
+# ``expectation()`` is a float in (0, 1); the lexicographic key is consumed by
+# ``min`` over ints/strings, so it is mapped to a negated integer at a fixed
+# scale (more strength -> smaller key). ``_GRADED_SCALE`` is large enough that
+# the opinion expectation's float resolution is preserved as an int ordering.
 
-_CAT_SCALE = 10**9
+_GRADED_SCALE = 10**9
+
+# A move the graded layer makes no claim about (absent from the ranking, or an
+# empty ranking) scores the neutral graded strength — the expectation of a
+# vacuous opinion at the neutral base rate. Term 3 only ever ranks crisp
+# survivors, which are all present in the graded layer, so this default is a
+# safety fallback; a neutral 0.5 neither favours nor penalises an unranked move.
+_NEUTRAL_GRADED_STRENGTH = 0.5
 
 
-def _categoriser_score(probe: MoveProbe, graph: RootArgumentGraph) -> float:
-    """The move's graded-layer Categoriser score (selector key term 3).
+def _graded_strength(probe: MoveProbe, graph: RootArgumentGraph) -> float:
+    """The move's opinion-valued graded strength (selector key term 3).
 
-    Read from ``graph.ranking["move_scores"]`` — the per-move Categoriser score
-    keyed by move PDN (``arguments.build_graded_layer``). A move absent from the
-    graded AF (it was crisply eliminated, or the ranking is empty) scores the
-    Categoriser default of an unattacked argument, ``1.0`` — a move the graded
-    layer makes no claim about is not penalised by term 3.
+    Read from ``graph.ranking["move_scores"]`` — each surviving move's
+    ``Opinion.expectation()`` keyed by move PDN (``arguments.build_graded_layer``,
+    design V1.5-D7). A move absent from the graded layer (it was crisply
+    eliminated, or the ranking is empty) scores the neutral
+    ``_NEUTRAL_GRADED_STRENGTH`` — a move the graded layer makes no claim about
+    is neither favoured nor penalised by term 3.
     """
     move_scores = graph.ranking.get("move_scores")
     if not move_scores:
-        return 1.0
-    return float(move_scores.get(probe.pdn, 1.0))
+        return _NEUTRAL_GRADED_STRENGTH
+    return float(move_scores.get(probe.pdn, _NEUTRAL_GRADED_STRENGTH))
 
 
 # --- value-weighted accepted-heuristic-pro count (selector key term 4) ------
@@ -330,11 +351,12 @@ def _selection_key(
        fallback (see :func:`_worst_fact_objection_magnitude`);
     2. the FACT pro-value priority tuple, negated so "more pro" sorts first
        (winning, large material, crown, small material) — four components;
-    3. the move's Categoriser score (graded layer), scaled to an int and
-       negated so a *higher* Categoriser score sorts first
-       (see :func:`_categoriser_score`);
+    3. the move's opinion-valued graded strength (the v1.5 graded layer),
+       scaled to an int and negated so a *higher* strength sorts first
+       (see :func:`_graded_strength`);
     4. the value-weighted accepted-HEURISTIC-pro count, negated so *more*
-       accepted heuristic support sorts first
+       accepted heuristic support sorts first — redundant in this mode under
+       the v1.5 opinion layer, retained for the ``support`` selector mode
        (see :func:`_accepted_heuristic_pro_count`);
     5. the static evaluation of the reached position, negated so a higher
        evaluation sorts first, then the move's PDN string (deterministic
@@ -343,8 +365,9 @@ def _selection_key(
     The graded terms 3-4 come strictly **after** the FACT terms 1-2 in the
     lexicographic ordering: a FACT decision always dominates a graded one, so
     the graded layer can never override a position the FACT terms already
-    decide (design §7 — fact-as-highest-value). The graded layer also ranks
-    only crisp survivors and so can never resurrect a crisply-eliminated move.
+    decide (design V1.5-D6 — fact-as-highest-value). The graded layer also
+    ranks only crisp survivors and so can never resurrect a crisply-eliminated
+    move.
 
     ``graph`` is the crisp + graded argument graph the probes were evaluated
     against — term 1 reads its grounded extension to tell a grounded survivor
@@ -358,9 +381,10 @@ def _selection_key(
     objection_magnitude = _worst_fact_objection_magnitude(probe, graph)
     winning, large_material, crown, small_material = _fact_pro_priority(probe)
 
-    # Graded term 3 — the Categoriser score, scaled to a negated int so a
-    # higher Cat (fewer / weaker heuristic objections) sorts first under ``min``.
-    cat_key = -round(_categoriser_score(probe, graph) * _CAT_SCALE)
+    # Graded term 3 — the opinion-valued graded strength, scaled to a negated
+    # int so a higher strength (stronger HEURISTIC support net of objections)
+    # sorts first under ``min``.
+    cat_key = -round(_graded_strength(probe, graph) * _GRADED_SCALE)
     # Graded term 4 — the value-weighted accepted-heuristic-pro count, negated
     # so more accepted heuristic support sorts first.
     heuristic_pro_key = -_accepted_heuristic_pro_count(probe)
@@ -454,13 +478,14 @@ def _categoriser_key(
 ) -> tuple[int, int, int, str]:
     """``categoriser`` mode key — the graded layer alone, then the tiebreak.
 
-    Minimises the negated Categoriser score (graded term 3), then the negated
-    accepted-heuristic-pro count (graded term 4), then the static-eval / PDN
-    tiebreak. The FACT terms 1-2 are omitted — ``categoriser`` ranks purely by
-    the graded Categoriser layer (this is the mode the design §7 names for
-    differential testing of the graded layer in isolation).
+    Minimises the negated opinion-valued graded strength (graded term 3), then
+    the negated accepted-heuristic-pro count (graded term 4), then the
+    static-eval / PDN tiebreak. The FACT terms 1-2 are omitted — ``categoriser``
+    ranks purely by the v1.5 opinion-valued graded layer (the mode the design
+    names for differential testing of the graded layer in isolation; the name
+    is kept for multi-mode surface parity with dialectical-chess).
     """
-    cat_key = -round(_categoriser_score(probe, graph) * _CAT_SCALE)
+    cat_key = -round(_graded_strength(probe, graph) * _GRADED_SCALE)
     heuristic_pro_key = -_accepted_heuristic_pro_count(probe)
     return (cat_key, heuristic_pro_key, _static_eval_int(probe, board), probe.pdn)
 
@@ -470,14 +495,14 @@ def _support_key(
 ) -> tuple[int, int, int, str]:
     """``support`` mode key — the heuristic-pro support proxy first.
 
-    Minimises the negated accepted-heuristic-pro count (the design §7 v1
-    support proxy) first, then the negated Categoriser score, then the
-    static-eval / PDN tiebreak — the graded layer with the support term
-    promoted ahead of the Categoriser term, for differential testing of the
-    heuristic-pro contribution.
+    Minimises the negated accepted-heuristic-pro count (the heuristic-pro
+    support proxy) first, then the negated opinion-valued graded strength, then
+    the static-eval / PDN tiebreak — the graded layer with the raw support
+    count promoted ahead of the opinion strength, for differential testing of
+    the heuristic-pro contribution in isolation.
     """
     heuristic_pro_key = -_accepted_heuristic_pro_count(probe)
-    cat_key = -round(_categoriser_score(probe, graph) * _CAT_SCALE)
+    cat_key = -round(_graded_strength(probe, graph) * _GRADED_SCALE)
     return (heuristic_pro_key, cat_key, _static_eval_int(probe, board), probe.pdn)
 
 
@@ -519,14 +544,14 @@ def choose_move(
     * ``argument`` (default) — the full §7 lexicographic key: FACT terms 1-2,
       then graded terms 3-4, then the static-eval / PDN tiebreak
       (:func:`_selection_key`). This is the engine's playing mode.
-    * ``categoriser`` — the graded layer alone (Categoriser score, then
-      heuristic-pro count), then the tiebreak (:func:`_categoriser_key`).
+    * ``categoriser`` — the graded layer alone (opinion-valued graded strength,
+      then heuristic-pro count), then the tiebreak (:func:`_categoriser_key`).
     * ``score`` — the static evaluation alone, then the PDN tiebreak
       (:func:`_score_key`).
     * ``grounded`` — the crisp FACT terms 1-2 alone, then the tiebreak
       (:func:`_grounded_key`).
     * ``support`` — the heuristic-pro support proxy promoted ahead of the
-      Categoriser score, then the tiebreak (:func:`_support_key`).
+      opinion-valued graded strength, then the tiebreak (:func:`_support_key`).
     * ``optimizer`` — the full §7 lexicographic key, identical to ``argument``.
       dialectical-chess routes ``optimizer`` to a separate optimisation module;
       checkers has no such module (design §1 names none), so this mode is the

@@ -11,22 +11,28 @@ This module builds **two** layers, exactly as design ``notes/checkers-design.md`
   empty-survivor fallback — all moves). The crisp layer is **unchanged** from
   Phase 3b: the graded layer below is purely additive.
 
-* the **graded Categoriser** layer (design §7) — Phase 5. Over the crisp
-  survivors *only*, a **second** plain Dung ``ArgumentationFramework`` whose
-  arguments are the surviving ``move:`` arguments plus the **HEURISTIC** ``obj:``
-  arguments on those survivors, with a defeat edge from each heuristic objection
-  to its move. ``categoriser_scores`` (from ``formal-argumentation``,
-  ``Besnard_2001`` / ``Bonzon_2016``) is run on it: ``Cat(move:A) = 1/(1 + Σ
-  Cat(attackers))`` is high when a move has few / weak heuristic objections. The
-  per-move Categoriser score is exposed on :attr:`RootArgumentGraph.ranking`.
+* the **opinion-valued graded** layer (design v1.5, ``notes/checkers-v1.5-
+  design.md`` decisions V1.5-D1..D7) — the v1.5 upgrade. Over the crisp
+  survivors *only*, a ``doxa.BipolarOpinionGraph`` whose nodes are the surviving
+  ``move:`` arguments plus one leaf node per **HEURISTIC** witness on those
+  survivors. ``doxa.evaluate`` resolves it bottom-up to a per-argument Jøsang
+  ``Opinion``: each move's resolved opinion accrues its HEURISTIC supporters
+  (pro-reasons) and attackers (objections) under doxa's CCF operator. The
+  per-move ``Opinion`` and its ``expectation()`` strength are exposed on
+  :attr:`RootArgumentGraph.ranking`.
+
+  This **replaces** the attack-only Categoriser of Phase 5. The decisive reason
+  (design V1.5-D1): CCF accrual is the only operator where balanced
+  disagreement raises uncertainty ``u`` — a *contested* move (strong HEURISTIC
+  pro AND strong HEURISTIC objection) stays distinguishable from a *bland* one,
+  which the attack-only scalar Categoriser structurally could not do. HEURISTIC
+  **pro**-reasons are now first-class graph nodes (``supports`` edges) — they
+  no longer need a separate selector-key proxy.
 
   The graded layer **only ranks** — it can never resurrect a crisply-eliminated
-  move (its node set is a subset of the crisp survivors) and never overrides a
-  FACT decision (the selector's graded key terms come strictly after the FACT
-  terms — see ``selection.py``). HEURISTIC **pro**-reasons cannot enter a Dung
-  AF (it has only attacks); design §7 v1 makes them a selector-key term, not a
-  graded-AF node, and this module does **not** build a QBAF (the deferred
-  v1.5).
+  move (its move-node set is a subset of the crisp survivors) and never
+  overrides a FACT decision (the selector's graded key term comes strictly
+  after the FACT terms — see ``selection.py``).
 
 The crisp argument families (design §6), one Dung argument per row:
 
@@ -69,13 +75,23 @@ This module imports only ``dialectical_checkers``, the stdlib, and
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from argumentation.dung import ArgumentationFramework, grounded_extension
-from argumentation.ranking import categoriser_scores
+from doxa import BipolarOpinionGraph, Opinion, evaluate
 
 from dialectical_checkers.evidence import to_argument_evidence
+from dialectical_checkers.graded_tuning import (
+    _EDGE_TRUST_BASE_RATE,
+    _WITNESS_BASE_RATE,
+    _WITNESS_UNCERTAINTY,
+    move_base_rate,
+    witness_belief,
+)
 from dialectical_checkers.scheme import Tier
+
+if TYPE_CHECKING:
+    from dialectical_checkers.board import CheckersBoard
 
 
 @dataclass(frozen=True)
@@ -110,19 +126,22 @@ class RootArgumentGraph:
     grounded ``move:`` arguments, or — under the empty-survivor fallback — all
     move PDNs).
 
-    ``ranking`` carries the **graded Categoriser** layer (design §7), built by
-    :func:`build_graded_layer` over the crisp survivors. Its keys:
+    ``ranking`` carries the **opinion-valued graded** layer (design v1.5),
+    built by :func:`build_graded_layer` over the crisp survivors. Its keys:
 
-    * ``"scores"`` — ``dict[str, float]``: the ``categoriser_scores`` Categoriser
-      score of *every* node of the graded AF (the surviving ``move:`` arguments
-      and their HEURISTIC ``obj:`` arguments).
-    * ``"move_scores"`` — ``dict[str, float]``: the per-move Categoriser score,
-      keyed by **move PDN** — the selector's term-3 lookup. A move PDN absent
-      from the graded AF (a crisply-eliminated move) is absent here.
-    * ``"arguments"`` / ``"defeats"`` — the graded AF's node and edge sets, for
-      inspection / tests.
-    * ``"converged"`` / ``"iterations"`` — the ``categoriser_scores`` fixpoint
-      diagnostics.
+    * ``"move_opinions"`` — ``dict[str, Opinion]``: each surviving move's
+      resolved Jøsang ``Opinion`` from ``doxa.evaluate``, keyed by **move
+      PDN**. The full opinion — the uncertainty channel ``u`` survives here for
+      selection / explanation (design V1.5-D2).
+    * ``"move_scores"`` — ``dict[str, float]``: each surviving move's scalar
+      strength ``Opinion.expectation()`` (``b + a*u``), keyed by **move PDN** —
+      the selector's term-3 lookup. A move PDN absent from the graded graph (a
+      crisply-eliminated move) is absent here.
+    * ``"opinions"`` — ``dict[str, Opinion]``: the resolved ``Opinion`` of
+      *every* node of the graded graph (move nodes and HEURISTIC witness leaf
+      nodes), for inspection / tests.
+    * ``"arguments"`` / ``"supports"`` / ``"attacks"`` — the graded graph's
+      node and edge sets, for inspection / tests.
 
     ``ranking`` is ``{}`` only for an empty graph (a terminal position, no
     probes); for any non-empty graph it carries the graded layer.
@@ -178,96 +197,220 @@ def _is_fact(label: str) -> bool:
         return False
 
 
-def _is_heuristic(label: str) -> bool:
-    """True iff ``label`` is a HEURISTIC-tier witness (design §7 graded layer).
+def _witness_arg_id(pdn: str, label: str) -> str:
+    """The graded-graph leaf-node id for HEURISTIC witness ``label`` on ``pdn``.
 
-    The exact dual of :func:`_is_fact`: parsed once through
-    ``evidence.to_argument_evidence``. A label the parser rejects is not a known
-    HEURISTIC witness and is excluded — the graded layer never silently admits
-    an untyped label, exactly as the crisp layer never admits one.
+    A ``wit:`` prefix (distinct from the crisp layer's ``obj:`` / ``reply:`` /
+    ``defense:`` families) so a graded witness node can never collide with a
+    crisp argument id. The PDN is embedded so the same HEURISTIC label on two
+    different moves gets two distinct leaf nodes.
     """
-    try:
-        return to_argument_evidence(label).tier is Tier.HEURISTIC
-    except ValueError:
-        return False
+    return f"wit:{pdn}:{label}"
+
+
+def _witness_opinion(magnitude: int | None) -> Opinion:
+    """The intrinsic ``Opinion`` of a HEURISTIC witness leaf node (design D5).
+
+    Belief from :func:`graded_tuning.witness_belief` (the witness's firing
+    strength, scaled by magnitude); the fixed soft-judgement uncertainty
+    ``_WITNESS_UNCERTAINTY``; the residual disbelief; a neutral base rate. The
+    same opinion shape encodes a pro-reason and an objection — the graph's
+    ``supports`` vs ``attacks`` edge decides the sign (``doxa.evaluate`` negates
+    a discounted attacker), so a witness opinion is always a positive belief in
+    *the witness's own claim*.
+    """
+    belief = witness_belief(magnitude)
+    disbelief = 1.0 - belief - _WITNESS_UNCERTAINTY
+    return Opinion(belief, disbelief, _WITNESS_UNCERTAINTY, _WITNESS_BASE_RATE)
 
 
 def build_graded_layer(
-    probes: list[MoveProbe], survivors: frozenset[str]
+    probes: list[MoveProbe],
+    survivors: frozenset[str],
+    board: CheckersBoard | None,
 ) -> dict[str, Any]:
-    """Build the graded Categoriser layer over the crisp survivors (design §7).
+    """Build the opinion-valued graded layer over the crisp survivors (v1.5).
 
-    A **second** plain Dung ``ArgumentationFramework``, built over the crisp
-    survivors *only*:
+    Replaces the attack-only Categoriser (design v1.5, decisions V1.5-D1..D7).
+    Builds a ``doxa.BipolarOpinionGraph`` over the crisp survivors *only* and
+    resolves it with ``doxa.evaluate``:
 
-    * its arguments are the surviving ``move:`` arguments — one per move PDN in
-      ``survivors`` — plus the **HEURISTIC** ``obj:`` arguments on those
-      survivors (a heuristic objection on a *crisply-eliminated* move never
-      enters, since that move's ``move:`` argument is not a node);
-    * its defeat edges run heuristic ``obj: -> move:`` — one per HEURISTIC
-      objection on a surviving move.
+    * **move nodes** — one ``move:{pdn}`` per move PDN in ``survivors``, with
+      ``intrinsic = Opinion.vacuous(a)``: a vacuous opinion whose base rate
+      ``a`` is the move's synthesized prior (design V1.5-D4 —
+      :func:`graded_tuning.move_base_rate` of ``static_evaluation`` of the
+      position the move reaches). A move with no HEURISTIC witness resolves to
+      ``expectation() == a`` exactly.
+    * **witness leaf nodes** — one ``wit:{pdn}:{label}`` per HEURISTIC witness
+      (pro-reason or objection) on a surviving move, with a non-vacuous
+      ``intrinsic`` Opinion encoding that witness (design V1.5-D5,
+      :func:`_witness_opinion`). FACT witnesses do NOT enter — they are the
+      crisp layer's business (design V1.5-D6).
+    * **``supports``** — a ``(witness, move)`` edge per HEURISTIC pro-reason.
+      **``attacks``** — a ``(witness, move)`` edge per HEURISTIC objection.
+    * **``edge_opinions``** — full trust (``Opinion.dogmatic_true``) on every
+      edge; per-edge witness reliability is a later tuning knob, not v1
+      (design V1.5-D3).
 
-    ``categoriser_scores`` (``formal-argumentation``, ``Besnard_2001`` /
-    ``Bonzon_2016`` Def. 9) is run on it: ``Cat(move:A) = 1/(1 + Σ
-    Cat(attackers))``, so a move with few / weak heuristic objections scores
-    high. The returned dict is :attr:`RootArgumentGraph.ranking` — see that
-    class's docstring for the key contract.
+    ``doxa.evaluate`` resolves each move's ``Opinion`` bottom-up: HEURISTIC
+    supporters and (negated) attackers are accrued under doxa's CCF operator,
+    so a *contested* move with a strong pro AND a strong objection resolves to
+    high uncertainty ``u`` — the channel an attack-only scalar layer collapsed
+    (design V1.5-D1). The returned dict is :attr:`RootArgumentGraph.ranking` —
+    see that class's docstring for the key contract.
 
-    Only **HEURISTIC** objections enter — FACT objections live in the crisp
-    layer (design §6) and are *not* re-litigated here. Heuristic **reply**
-    attacks are not added: design §7 v1 builds the graded AF from "the
-    HEURISTIC ``obj:`` nodes" only, and ``witnesses.py`` types every reply it
-    emits FACT (a reply is emitted only from a proven resolver line), so there
-    is no heuristic reply to add. Heuristic **pro**-reasons cannot enter a Dung
-    AF at all (it has only attacks) — design §7 makes them a selector-key term,
-    not a graded-AF node; this function builds **no QBAF** (deferred v1.5).
+    ``board`` is the position the probed moves are played from — needed to
+    apply each move for the base-rate synthesis (design V1.5-D4, the one
+    signature change). When it is ``None`` (the graded layer is unit-tested
+    without a board) every move base rate falls back to the neutral ``0.5``, so
+    an unargued move resolves to ``expectation() == 0.5``.
 
-    The graded AF can never resurrect a crisply-eliminated move: its ``move:``
+    The graded graph can never resurrect a crisply-eliminated move: its move-
     node set is exactly ``survivors``. An empty ``survivors`` (no probes) yields
     an empty graded layer.
     """
     survivor_probes = [p for p in probes if p.pdn in survivors]
+    if not survivor_probes:
+        # A terminal position / empty survivor set — the trivial empty layer.
+        return {
+            "move_opinions": {},
+            "move_scores": {},
+            "opinions": {},
+            "arguments": frozenset(),
+            "supports": frozenset(),
+            "attacks": frozenset(),
+        }
 
-    graded_arguments: set[str] = set()
-    graded_defeats: set[tuple[str, str]] = set()
+    # The position the move reaches, per surviving move PDN — needed for the
+    # base-rate synthesis. With no board the synthesis falls back to neutral.
+    child_eval_by_pdn = _child_evaluations(board, survivor_probes)
+
+    arguments: set[str] = set()
+    intrinsic: dict[str, Opinion] = {}
+    supports: set[tuple[str, str]] = set()
+    attacks: set[tuple[str, str]] = set()
+    edge_opinions: dict[tuple[str, str], Opinion] = {}
+    move_node_by_pdn: dict[str, str] = {}
+
     for probe in survivor_probes:
         move_id = _move_arg(probe.pdn)
-        graded_arguments.add(move_id)
-        # Only HEURISTIC objections enter the graded AF; FACT objections are
-        # the crisp layer's business and are not re-litigated here.
-        for label in probe.objections:
-            if not _is_heuristic(label):
+        move_node_by_pdn[probe.pdn] = move_id
+        arguments.add(move_id)
+        # The move node carries no own evidence — a vacuous opinion whose base
+        # rate is the move's synthesized prior (design V1.5-D4).
+        intrinsic[move_id] = Opinion.vacuous(
+            move_base_rate(child_eval_by_pdn[probe.pdn])
+        )
+
+        # HEURISTIC pro-reasons -> support edges from a witness leaf.
+        for label in probe.reasons:
+            evidence = _heuristic_evidence(label)
+            if evidence is None:
                 continue
-            obj_id = obj_arg_id(probe.pdn, label)
-            graded_arguments.add(obj_id)
-            graded_defeats.add((obj_id, move_id))
+            wit_id = _witness_arg_id(probe.pdn, label)
+            arguments.add(wit_id)
+            intrinsic[wit_id] = _witness_opinion(evidence.magnitude)
+            edge = (wit_id, move_id)
+            supports.add(edge)
+            edge_opinions[edge] = Opinion.dogmatic_true(_EDGE_TRUST_BASE_RATE)
 
-    framework = ArgumentationFramework(
-        arguments=frozenset(graded_arguments),
-        defeats=frozenset(graded_defeats),
+        # HEURISTIC objections -> attack edges from a witness leaf. FACT
+        # objections live in the crisp layer and are not re-litigated here.
+        for label in probe.objections:
+            evidence = _heuristic_evidence(label)
+            if evidence is None:
+                continue
+            wit_id = _witness_arg_id(probe.pdn, label)
+            arguments.add(wit_id)
+            intrinsic[wit_id] = _witness_opinion(evidence.magnitude)
+            edge = (wit_id, move_id)
+            attacks.add(edge)
+            edge_opinions[edge] = Opinion.dogmatic_true(_EDGE_TRUST_BASE_RATE)
+
+    graph = BipolarOpinionGraph(
+        arguments=frozenset(arguments),
+        intrinsic=intrinsic,
+        supports=frozenset(supports),
+        attacks=frozenset(attacks),
+        edge_opinions=edge_opinions,
     )
-    result = categoriser_scores(framework)
+    # The graph is a DAG by construction — witness leaves point only at move
+    # nodes, move nodes have no out-edges — so ``evaluate`` never raises
+    # ``CyclicGraphError``.
+    opinions = evaluate(graph)
 
-    # The per-move Categoriser score, keyed by move PDN — the selector's term-3
-    # lookup (design §7). A crisply-eliminated move has no node in the graded
-    # AF, so it is simply absent here.
+    move_opinions = {
+        pdn: opinions[node] for pdn, node in move_node_by_pdn.items()
+    }
+    # The per-move scalar strength — the selector's term-3 lookup. A move with
+    # no HEURISTIC witness has a vacuous resolved opinion, so its expectation
+    # falls back to exactly its synthesized base rate ``a`` (design V1.5-D4).
     move_scores = {
-        probe.pdn: result.scores[_move_arg(probe.pdn)]
-        for probe in survivor_probes
+        pdn: opinion.expectation() for pdn, opinion in move_opinions.items()
     }
 
     return {
-        "scores": dict(result.scores),
+        "move_opinions": move_opinions,
         "move_scores": move_scores,
-        "arguments": frozenset(graded_arguments),
-        "defeats": frozenset(graded_defeats),
-        "converged": result.converged,
-        "iterations": result.iterations,
+        "opinions": dict(opinions),
+        "arguments": frozenset(arguments),
+        "supports": frozenset(supports),
+        "attacks": frozenset(attacks),
     }
 
 
-def build_root_argument_graph(probes: list[MoveProbe]) -> RootArgumentGraph:
-    """Build the crisp Dung argument graph + graded Categoriser layer.
+def _heuristic_evidence(label: str):  # noqa: ANN202 — ArgumentEvidence | None
+    """The parsed evidence for ``label`` iff it is a HEURISTIC witness, else None.
+
+    A label the evidence parser rejects, or one that types FACT, is not a
+    graded-layer witness and yields ``None`` — the graded layer never silently
+    admits an untyped or FACT label, exactly as the crisp layer never does.
+    """
+    try:
+        evidence = to_argument_evidence(label)
+    except ValueError:
+        return None
+    if evidence.tier is not Tier.HEURISTIC:
+        return None
+    return evidence
+
+
+def _child_evaluations(
+    board: CheckersBoard | None, survivor_probes: list[MoveProbe]
+) -> dict[str, int]:
+    """Map each surviving move's PDN to ``static_evaluation`` of its child.
+
+    The base-rate synthesis (design V1.5-D4) needs the static evaluation of the
+    position each move reaches. With ``board`` ``None`` (the graded layer is
+    unit-tested without a board) every child evaluation is 0 — so every move
+    base rate falls back to the neutral ``0.5`` and an unargued move resolves to
+    ``expectation() == 0.5``.
+    """
+    if board is None:
+        return {p.pdn: 0 for p in survivor_probes}
+    # Imported lazily — ``search`` and ``board`` are only needed when a real
+    # board is threaded through, and importing them at module load would widen
+    # the crisp layer's import surface for no reason on the board-free path.
+    from dialectical_checkers.search import static_evaluation
+
+    pdn_to_child: dict[str, int] = {}
+    survivor_pdns = {p.pdn for p in survivor_probes}
+    for move in board.legal_moves():
+        pdn = move.pdn()
+        if pdn in survivor_pdns:
+            pdn_to_child[pdn] = static_evaluation(board.apply(move))
+    # A survivor whose PDN is not a legal move on ``board`` (a mismatched
+    # board / probe pairing) falls back to the neutral evaluation rather than
+    # raising — the graded layer only ranks, it never gates legality.
+    for pdn in survivor_pdns:
+        pdn_to_child.setdefault(pdn, 0)
+    return pdn_to_child
+
+
+def build_root_argument_graph(
+    probes: list[MoveProbe], board: CheckersBoard | None = None
+) -> RootArgumentGraph:
+    """Build the crisp Dung argument graph + opinion-valued graded layer.
 
     For each probe (one per legal move):
 
@@ -292,13 +435,18 @@ def build_root_argument_graph(probes: list[MoveProbe]) -> RootArgumentGraph:
     is the moves whose ``move:`` argument is grounded, or — when none is (the
     empty-survivor fallback, design §6) — *all* moves.
 
-    The **graded Categoriser** layer (design §7) is then built by
+    The **opinion-valued graded** layer (design v1.5) is then built by
     :func:`build_graded_layer` over those crisp survivors and stored on
     :attr:`RootArgumentGraph.ranking`. The graded layer is purely additive: the
     crisp ``arguments`` / ``defeats`` / ``grounded_extension`` / ``survivors``
-    are exactly Phase 3b's, and the graded layer's ``move:`` node set is a
-    *subset* of ``survivors`` — it can never resurrect a crisply-eliminated
-    move.
+    are exactly Phase 3b's, and the graded layer's move-node set is a *subset*
+    of ``survivors`` — it can never resurrect a crisply-eliminated move.
+
+    ``board`` is the position the probed moves are played from — threaded to
+    :func:`build_graded_layer` for the move base-rate synthesis (design
+    V1.5-D4). It is optional: with no board the graded base rates fall back to
+    the neutral ``0.5`` and the graded ranking is driven purely by the
+    HEURISTIC-witness accrual.
     """
     arguments: set[str] = set()
     defeats: set[tuple[str, str]] = set()
@@ -361,11 +509,11 @@ def build_root_argument_graph(probes: list[MoveProbe]) -> RootArgumentGraph:
     else:
         survivors = frozenset(move_arguments)
 
-    # The graded Categoriser layer (design §7) — built over the crisp survivors
-    # only, so it can never resurrect a crisply-eliminated move. For an empty
-    # graph (no probes / terminal position) ``survivors`` is empty and the
-    # graded layer is the trivial empty AF's result.
-    ranking = build_graded_layer(probes, survivors)
+    # The opinion-valued graded layer (design v1.5) — built over the crisp
+    # survivors only, so it can never resurrect a crisply-eliminated move. For
+    # an empty graph (no probes / terminal position) ``survivors`` is empty and
+    # the graded layer is the trivial empty result.
+    ranking = build_graded_layer(probes, survivors, board)
 
     return RootArgumentGraph(
         arguments=frozenset(arguments),
